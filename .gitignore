@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+checkpoints/
+replays/
+*.replay
+.unswbc-build/
+bots/maps/

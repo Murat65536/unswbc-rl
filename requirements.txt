@@ -1,0 +1,4 @@
+# Training (local dev or Colab). The exported competition bot itself only
+# ever uses numpy + the Python standard library -- see export/.
+torch>=2.2
+numpy>=1.26
