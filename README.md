@@ -82,22 +82,28 @@ itself is C++20, as the judge builds it.
 ## Train, export, evaluate, submit
 
 ```bash
-# Train (CPU or CUDA; checkpoints are written atomically):
+# Train (CPU or CUDA; checkpoints are written atomically). --init-from starts
+# from an older checkpoint even across observation changes; --resume continues one:
 python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0.3 \
-    --kelp 0.0 0.25 --scripted-frac 0.25 \
+    --kelp 0.0 0.25 --scripted-frac 0.35 --scripted-careful 0.6 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
-# Export the actor as a C++ bot and run the export gate (native + judge sandbox):
-python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v2
+# Compare checkpoints quickly, natively, against the careful scripted player:
+python -m rl.eval_env checkpoints/run1/ckpt_000500.pt checkpoints/run1/latest.pt --opponent careful
 
-# Play it against the random starter on the official and generated maps, both sides:
-python -m export.evaluate --bot bots/rl_bot_v2 --generated 12
+# Export the actor as a C++ bot and run the export gate (native + judge sandbox):
+python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v4
+
+# Play it in the judge's sandbox, both sides of the official and generated maps,
+# against the random starter, the careful player, or another bot:
+python -m export.evaluate --bot bots/rl_bot_v4 --generated 12
+python -m export.evaluate --bot bots/rl_bot_v4 --opponent careful --generated 12
 # Or decide whether a new version beats an old one (SPRT, Elo bounds 0 and 30):
-python -m export.evaluate --bot bots/new --opponent bots/rl_bot_v2 --sprt 0 30
+python -m export.evaluate --bot bots/rl_bot_v4 --opponent bots/rl_bot_v3 --sprt 0 30
 
 # The toolkit's own commands work too:
-unswbc run maps/arena.map bots/rl_bot_v2 bots/rl_bot_v2 --sandbox -v
-unswbc submit bots/rl_bot_v2 -n rl-v2 -d "PPO self-play, C++ int8"
+unswbc run maps/arena.map bots/rl_bot_v3 bots/rl_bot_v3 --sandbox -v
+unswbc submit bots/rl_bot_v3 -n rl-v3 -d "PPO self-play, C++ int8, queen shield"
 ```
 
 ## How it works
@@ -198,11 +204,18 @@ each game, and with `--sprt` runs a sequential test between two versions.
 
 - **Sonar is unused.** The View carries messages and echoes, but the
   observation and actions do not use them yet.
-- **Queen and longest dragon.** The bot still under-values the round-limit
-  tiebreak order (queen, then longest, then total): it splits freely and
-  risks its queen. Shaping on the longest dragon rather than the total,
-  or longer training against opponents that survive to the limit, are
-  the obvious next steps.
+- **The queen still gets cornered.** With the level-2 shield the queen no
+  longer trades heads, splits by choice or is rammed by its allies, but it
+  still dies when no move it can see survives: a long queen in its own
+  coil, a short one in a dead-end corridor, or one boxed in by allies. A
+  7×7 window shows little of a long body; sonar, or allies keeping clear
+  of the queen, may help. (On autarky, dilemma and slithery_fight each
+  queen starts at the mouth of a dead-end corridor and is lost by round 5
+  whatever it does.)
+- **The longest-dragon tiebreak.** When both queens die, the bot's habit
+  of splitting into many short dragons loses the second tiebreak to
+  opponents that keep one long dragon (most of v3's losses to the careful
+  player).
 - **The policy is an MLP.** A small convolutional or attention trunk over
   the window would likely learn faster; the points budget leaves room for
   a much bigger network (a turn uses about 4% of it).
