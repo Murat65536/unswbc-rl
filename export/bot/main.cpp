@@ -24,6 +24,8 @@ int main()
     std::setvbuf(stdout, output, _IOFBF, sizeof output);
 
     core::BlockReader reader;
+    // This dragon's memory of its own body, kept across its turns.
+    core::Memory memory;
     static char line[1 << 12];
     alignas(16) static uint8_t obs[core::kObsSize];
     uint8_t mask[core::kNumActions];
@@ -34,7 +36,8 @@ int main()
             continue;
         }
         core::View const& view = reader.Current();
-        core::MoveSight const sight = core::LookAhead(view);
+        memory.Update(view);
+        core::MoveSight const sight = core::LookAhead(view, &memory);
         core::Encode(view, sight, obs);
         core::Mask(view, sight, kMaskLevel, mask);
         int const action = net::Act(obs, mask);

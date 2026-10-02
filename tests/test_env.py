@@ -82,15 +82,18 @@ def episode_seeds(records, first_seed, base):
 
 
 def replay(seed, options, decisions):
-    """A Match on that level, with the (decisions, action) pairs played."""
+    """A Match on that level, with the (decisions, action) pairs played, and
+    each dragon's Brain (its memory) as the environment kept it."""
     text, match_seed, _ = bccore.level_map(seed, options)
     match = bccore.Match(text, match_seed)
     match.begin()
+    brains = {}
     for buf, action in decisions:
         did = int(buf["info"][0][0])
-        init, block = match.init_block(did), match.round_block(did)
-        match.reply(bccore.decode_action(init, block, action) + "\nENDTURN\n")
-    return match
+        brain = brains.setdefault(did, bccore.Brain())
+        brain.observe(match.init_block(did), match.round_block(did))
+        match.reply(brain.decode(action) + "\nENDTURN\n")
+    return match, brains
 
 
 def test_every_decision_saw_its_turns_board():
@@ -112,11 +115,12 @@ def test_every_decision_saw_its_turns_board():
         match = bccore.Match(text, match_seed)
         match.begin()
         split_round = {}
+        brains = {}  # each dragon's process, with its memory of its turns
         for buf, action in by_episode[episode]:
             did, team, round_num, _ = (int(v) for v in buf["info"][0])
             assert match.current() == did and match.round == round_num
-            init, block = match.init_block(did), match.round_block(did)
-            obs, masks = bccore.features_from_blocks(init, block)
+            brain = brains.setdefault(did, bccore.Brain())
+            obs, masks = brain.observe(match.init_block(did), match.round_block(did))
             assert np.array_equal(obs, buf["obs"][0])
             assert np.array_equal(masks[2], buf["mask"][0])  # the environment's default level
             if did in split_round:
@@ -124,7 +128,7 @@ def test_every_decision_saw_its_turns_board():
                 births += 1
             if action == 12:
                 split_round[len(match.dragons())] = round_num
-            match.reply(bccore.decode_action(init, block, action) + "\nENDTURN\n")
+            match.reply(brain.decode(action) + "\nENDTURN\n")
         assert match.current() is None  # the game ended where the environment said
     assert births > 0
 
@@ -209,14 +213,14 @@ def test_training_horizon_cuts_with_bootstrap_views():
         assert out["episodes"]["rounds"][0] == 12
         episode = int(records[k - 1][0]["info"][0][3])
         decisions = [(b, int(a[0])) for b, a, o in records[:k] if int(b["info"][0][3]) == episode]
-        match = replay(seeds[episode], options, decisions)
+        match, brains = replay(seeds[episode], options, decisions)
         # The engine has started round 12; the environment cut the game there
         # and gave every living dragon the view it would have had.
         assert match.round == 12 and match.current() is not None
         alive = [d[0] for d in match.dragons() if d[2]]
         boots = out["done_boot"]
         assert len(alive) == int((boots >= 0).sum()) == len(out["boot_obs"])
-        views = sorted(bytes(match.features(d)[0]) for d in alive)
+        views = sorted(bytes(brains.get(d, bccore.Brain()).copy().observe_match(match, d)[0]) for d in alive)
         assert views == sorted(bytes(o) for o in out["boot_obs"])
 
 

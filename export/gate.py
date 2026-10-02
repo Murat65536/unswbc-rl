@@ -3,7 +3,8 @@
 1. Record turn blocks from games the actor plays itself (the 15 official
    maps when the toolkit is installed, and generated maps in every
    symmetry), with, for each turn, the observation and mask training would
-   compute (bccore.features_from_blocks) and the integer actor's action.
+   compute (a bccore.Brain per dragon, which remembers across its turns as
+   the bot does) and the integer actor's action.
 2. Native: build the bot with the host compiler (plus -DUNSWBC_GATE, which
    makes it print its observation), feed it each dragon's blocks, and
    require the same observation and the same reply on every turn.
@@ -47,6 +48,7 @@ class Sequence:
     blocks: list = field(default_factory=list)
     obs: list = field(default_factory=list)
     replies: list = field(default_factory=list)
+    brain: object = field(default_factory=lambda: bccore.Brain(), repr=False)
 
 
 @dataclass
@@ -134,10 +136,10 @@ def record(integer: IntegerActor, mask_level: int, games: int, turns_per_game: i
                 mine[did] = Sequence(did, match.init_block(did))
             seq = mine[did]
             block = match.round_block(did)
-            obs, masks = bccore.features_from_blocks(seq.init, block)
+            obs, masks = seq.brain.observe(seq.init, block)
             mask = masks[mask_level]
             action = int(integer.act(obs[None], mask[None])[0])
-            reply = bccore.decode_action(seq.init, block, action)
+            reply = seq.brain.decode(action)
             seq.blocks.append(block)
             seq.obs.append((obs, mask))
             seq.replies.append(reply)
