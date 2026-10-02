@@ -75,13 +75,16 @@ itself is C++20, as the judge builds it.
 ```bash
 # Train (CPU or CUDA; checkpoints are written atomically):
 python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0.3 \
+    --kelp 0.0 0.25 --scripted-frac 0.25 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
 # Export the actor as a C++ bot and run the export gate (native + judge sandbox):
 python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v2
 
 # Play it against the random starter on the official and generated maps, both sides:
-python -m export.evaluate --bot bots/rl_bot_v2 --generated 6
+python -m export.evaluate --bot bots/rl_bot_v2 --generated 12
+# Or decide whether a new version beats an old one (SPRT, Elo bounds 0 and 30):
+python -m export.evaluate --bot bots/new --opponent bots/rl_bot_v2 --sprt 0 30
 
 # The toolkit's own commands work too:
 unswbc run maps/arena.map bots/rl_bot_v2 bots/rl_bot_v2 --sandbox -v
@@ -140,14 +143,18 @@ says so, open rows carry into the next rollout, GAE runs along each dragon's
 own decisions. The actor is an MLP on the observation codes trained
 quantisation-aware (int8 weights, uint8 activations); the critic is separate
 and privileged. A share of game slots pit the learner against frozen
-snapshots (a league), and Prioritized Level Replay picks levels.
+snapshots (a league), another share against a scripted random-safe player
+played inside the environment (`--scripted-frac`; self-play alone never
+punished losing the queen early, since both sides did it), and Prioritized
+Level Replay picks levels.
 
 **`export/`** turns a checkpoint into a bot: `quantize.py` derives the
 integer actor (int8 weights, int32 accumulation, fixed-point requantisation),
 `bot/net.h` runs it with WASM SIMD in the judge, and `gate.py` requires the
 compiled bot to agree with training on every recorded turn, natively and in
 the judge's sandbox, reporting points, memory and zip size. `evaluate.py`
-plays it against the random starter (or any bot) in the sandbox.
+plays it against the random starter (or any bot) in the sandbox, and with
+`--sprt` runs a sequential test between two versions.
 
 ## Tests
 
@@ -176,8 +183,6 @@ plays it against the random starter (or any bot) in the sandbox.
   (~0.2–0.3M decisions per core); compacting the board (tiles and edges)
   would help if a GPU makes the environment the bottleneck. A CUDA port
   was not attempted.
-- **Evaluation.** `export/evaluate.py` reports wins, losses and errors; a
-  sequential test (SPRT) between bot versions is still to do.
 
 ## Rules reference
 
