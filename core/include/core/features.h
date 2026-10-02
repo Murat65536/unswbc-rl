@@ -9,7 +9,7 @@
 // direction (edges, dragon headings, actions) is relative: forward, right,
 // back, left. A policy then learns one situation instead of four.
 
-#include "core/view.h"
+#include "view.h"
 
 #include <array>
 #include <cstdint>
