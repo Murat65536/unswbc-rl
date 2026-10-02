@@ -1,0 +1,4 @@
+# written by export/export_bot.py
+[project]
+language = "cpp"
+include = [ "*.cpp", "*.h" ]
