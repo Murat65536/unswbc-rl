@@ -45,6 +45,11 @@ inline int ToRelative(int facing, int world)
 //   3..11  two steps: 3 + 3 * first + second, each forward/right/left, the
 //          second relative to the facing the first step leaves
 //   12     split off the rear half: SPLIT floor(L / 2)
+//   13     shed: split off the last two segments, SPLIT 2. A small child, and
+//          the parent keeps the rest: how the queen grows a team while it
+//          stays long (a team that starts as its queen alone has no other way)
+//   14     dissolve: send no action at all, and die. Every second segment from
+//          the head turns into a pearl: food for the queen, close by
 //
 // A two-step move is free from length 5 (ceil(L / 4) free steps), costs a
 // segment at lengths 3 and 4, and kills a dragon of length 2 unless its first
@@ -54,7 +59,9 @@ constexpr int kTurns[3] = {kForward, kRight, kLeft};
 constexpr int kSingleSteps = 3;
 constexpr int kDoubleSteps = 9;
 constexpr int kSplitAction = kSingleSteps + kDoubleSteps;
-constexpr int kNumActions = kSplitAction + 1;
+constexpr int kShedAction = kSplitAction + 1;
+constexpr int kDissolveAction = kShedAction + 1;
+constexpr int kNumActions = kDissolveAction + 1;
 
 struct Command
 {
@@ -62,6 +69,8 @@ struct Command
     int mSplitSize = 0;
     int mSteps = 0;
     std::array<uint8_t, 2> mDirs{};
+    /// No action at all: the dragon dies (dissolve).
+    bool mDissolve = false;
 };
 
 inline int FreeSteps(int length)
@@ -72,10 +81,15 @@ inline int FreeSteps(int length)
 inline Command Decode(View const& view, int action)
 {
     Command command;
-    if (action == kSplitAction)
+    if (action == kSplitAction || action == kShedAction)
     {
         command.mSplit = true;
-        command.mSplitSize = view.mLength / 2;
+        command.mSplitSize = action == kSplitAction ? view.mLength / 2 : 2;
+        return command;
+    }
+    if (action == kDissolveAction)
+    {
+        command.mDissolve = true;
         return command;
     }
     if (action < kSingleSteps)
@@ -92,9 +106,14 @@ inline Command Decode(View const& view, int action)
     return command;
 }
 
-/// The reply line for a command, e.g. "MOVE NE" or "SPLIT 3".
+/// The reply line for a command, e.g. "MOVE NE" or "SPLIT 3"; empty for
+/// dissolve, which sends nothing before ENDTURN.
 inline std::string FormatCommand(Command const& command)
 {
+    if (command.mDissolve)
+    {
+        return {};
+    }
     if (command.mSplit)
     {
         char buffer[24];
@@ -780,6 +799,9 @@ class Survival
 // Level 0 masks only what the rules make certain death whatever the board:
 // an illegal split (child or parent under 2, or the unit limit reached).
 //
+// Dissolving is certain death: level 1 allows it only where the queen can
+// eat what it leaves (MayDissolve).
+//
 // Level 1 also masks moves the dragon can see are certain death: a step into
 // kelp, or onto a dragon segment that is not another dragon's head, at the
 // first or the second step (for the second, its own tail has moved on unless
@@ -794,8 +816,9 @@ class Survival
 // on another dragon's head, it keeps the first non-empty tier of: those it
 // can be sure of surviving its horizon after (Survival, which knows where its
 // whole body is from its Memory) that end where no enemy head is one step
-// away; those it can be sure of surviving; those that last longest. Only
-// with none of those may it split (which halves it, but it survives), and
+// away; those it can be sure of surviving; those that last longest. Besides
+// those it may shed two segments to grow its team (QueenMayShed). Only with
+// none of those moves may it split (which halves it, but it survives), and
 // only with no split either is it left level 1's choices. Every other
 // dragon keeps out of its queen's way at level 2: it does not end a move
 // beside the queen's head while it has another move (an ally there can be
@@ -831,6 +854,9 @@ struct MoveSight
     /// The move ends next to this team's queen's head (in sight), where it
     /// would stand in the queen's way.
     std::array<bool, kNumActions> mBesideQueen{};
+    /// This dragon's head is within two steps of its queen's head: pearls it
+    /// left here (dissolving) would be the queen's to eat.
+    bool mFeedSpot = false;
 };
 
 /// What the dragon can work out about its moves, from its View and, if it has
@@ -928,6 +954,13 @@ inline MoveSight LookAhead(View const& view, Memory const* memory = nullptr)
         {
             sight.mBesideQueen[a] = sight.mLanding[a] >= 0 && beside[sight.mLanding[a]];
         }
+        bool near = beside[kHeadTile];
+        for (int dir = 0; dir < 4 && !near; dir++)
+        {
+            int const next = StepTarget(view, kHeadTile, dir);
+            near = next >= 0 && beside[next];
+        }
+        sight.mFeedSpot = near;
     }
 
     Survival survival(view, memory);
@@ -969,6 +1002,22 @@ inline bool SplitLegal(View const& view)
     return view.mLength >= 4 && view.mUnitCount < view.mUnitLimit;
 }
 
+/// The queen may shed two segments to grow its team while it stays long:
+/// from length 6, before round 350 (late on, length is what counts), and not
+/// with an enemy head one step from where it stays.
+inline bool QueenMayShed(View const& view, MoveSight const& sight)
+{
+    return view.mLength >= 6 && view.mRound < 350 && sight.mReachHere < 2;
+}
+
+/// A dragon may dissolve where its queen can eat it: beside or a step from
+/// the queen's head, at length 3 or more (it leaves ceil(L / 2) pearls). The
+/// queen never does.
+inline bool MayDissolve(View const& view, MoveSight const& sight)
+{
+    return !IsQueen(view.mId) && sight.mFeedSpot && view.mLength >= 3;
+}
+
 /// 1 for every action allowed at `level` (0, 1 or 2), given the view's LookAhead.
 inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* out)
 {
@@ -977,6 +1026,7 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
         out[a] = 1;
     }
     out[kSplitAction] = SplitLegal(view) ? 1 : 0;
+    out[kShedAction] = SplitLegal(view) ? 1 : 0;
     if (level < 1)
     {
         return;
@@ -985,7 +1035,9 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
     bool any = false;
     for (int a = 0; a < kNumActions; a++)
     {
-        bool const fatal = a < kSplitAction && (sight.mVisiblyFatal[a] || sight.mHead[a] == kAllyHead);
+        // Dissolving is certain death, worth it only as the queen's food.
+        bool const fatal = (a < kSplitAction && (sight.mVisiblyFatal[a] || sight.mHead[a] == kAllyHead)) ||
+                           (a == kDissolveAction && !MayDissolve(view, sight));
         strict[a] = out[a] && !fatal ? 1 : 0;
         any = any || strict[a];
     }
@@ -1045,10 +1097,15 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
                 chosen = chosen || ok;
             }
         }
-        if (!chosen && strict[kSplitAction])
+        if (!chosen && (strict[kSplitAction] || strict[kShedAction]))
         {
-            tier[kSplitAction] = 1;
+            tier[kSplitAction] = strict[kSplitAction];
+            tier[kShedAction] = strict[kShedAction];
             chosen = true;
+        }
+        else if (chosen && strict[kShedAction] && QueenMayShed(view, sight))
+        {
+            tier[kShedAction] = 1;
         }
         if (chosen)
         {
@@ -1099,6 +1156,7 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 //   51..53  moves the dragon can be sure of after one step F/R/L (Survival),
 //           min(24) / 24
 //   54      its survival horizon, / 24
+//   55      its queen's head is within two steps (where dissolving feeds it)
 //
 // New features are appended (planes after the planes, scalars after the
 // scalars), so a checkpoint for an older layout can be widened with zero
@@ -1106,7 +1164,7 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 
 constexpr int kPlanes = 24;
 constexpr int kPlaneSize = kPlanes * kTiles;
-constexpr int kScalars = 55;
+constexpr int kScalars = 56;
 constexpr int kObsSize = kPlaneSize + kScalars;
 
 constexpr int kPlanePearl = 0;
@@ -1171,7 +1229,10 @@ inline float FeatureScale(int feature)
     case 4:
         return 2.0f / kMaxRounds;
     default:
-        return feature - kPlaneSize >= 51 ? 1.0f / 24.0f : feature - kPlaneSize >= 38 ? 0.5f : 1.0f;
+        return feature - kPlaneSize >= 55   ? 1.0f
+               : feature - kPlaneSize >= 51 ? 1.0f / 24.0f
+               : feature - kPlaneSize >= 38 ? 0.5f
+                                            : 1.0f;
     }
 }
 
@@ -1275,6 +1336,7 @@ inline void Encode(View const& view, MoveSight const& sight, uint8_t* out)
         scalars[51 + i] = sight.mSurvive[i];
     }
     scalars[54] = sight.mHorizon;
+    scalars[55] = sight.mFeedSpot;
 }
 
 inline void Encode(View const& view, uint8_t* out)

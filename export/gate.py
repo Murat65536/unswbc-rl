@@ -166,9 +166,13 @@ def native_check(bot_dir: pathlib.Path, sequences: list[Sequence], report: GateR
             stdin = seq.init + "".join(seq.blocks)
             out = subprocess.run([str(binary)], input=stdin.encode(), capture_output=True, check=True,
                                  cwd=bot_dir).stdout.decode()
-            lines = [line for line in out.split("\n") if line and line != "ENDTURN"]
-            seen_obs = [bytes.fromhex(line[4:]) for line in lines if line.startswith("OBS ")]
-            replies = [line for line in lines if not line.startswith("OBS ")]
+            # A turn's output ends at its ENDTURN; a dragon that dissolves
+            # writes no reply line before it.
+            seen_obs, replies = [], []
+            for turn in out.split("ENDTURN\n")[:-1]:
+                lines = [line for line in turn.split("\n") if line]
+                seen_obs += [bytes.fromhex(line[4:]) for line in lines if line.startswith("OBS ")]
+                replies.append("\n".join(line for line in lines if not line.startswith("OBS ")))
             for i, (obs_mask, expected) in enumerate(zip(seq.obs, seq.replies)):
                 report.native_turns += 1
                 if i >= len(seen_obs) or seen_obs[i] != obs_mask[0].tobytes():

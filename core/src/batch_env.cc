@@ -332,6 +332,11 @@ namespace {
 ControllerReply ReplyFor(Command const& command)
 {
     ControllerReply reply;
+    if (command.mDissolve)
+    {
+        reply.mAction = ActionSuicide{};
+        return reply;
+    }
     if (command.mSplit)
     {
         reply.mAction = ActionSplit{command.mSplitSize};

@@ -345,6 +345,10 @@ class Match
         core::View view;
         core::ViewFromState(copy, dragon, view);
         core::Command const command = core::Decode(view, action);
+        if (command.mDissolve)
+        {
+            return true;
+        }
         if (command.mSplit)
         {
             Split(copy, dragon, command.mSplitSize, {});

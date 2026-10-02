@@ -287,13 +287,14 @@ def test_episodes_report_the_queens(mask_level):
     n = 16
     env = bccore.BatchEnv(n, 4, dict(OPTIONS, mask_level=mask_level))
     rng = np.random.default_rng(4)
-    records = run(env, 2500, rng, split_bias=0.3)
+    records = run(env, 4000, rng, split_bias=0.3)
     games, splits, deciders, last_resort, causes = 0, 0, set(), 0, set()
     for buf, actions, out in records:
         for slot in range(n):
-            if buf["info"][slot][0] <= 1 and buf["mask"][slot][12] and mask_level == 2:
-                assert not buf["mask"][slot][:12].any()
-                last_resort += 1
+            if buf["info"][slot][0] <= 1 and mask_level == 2:
+                if buf["mask"][slot][12]:
+                    assert not buf["mask"][slot][:12].any()  # the half split: a last resort
+                last_resort += bool(buf["mask"][slot][12] or buf["mask"][slot][13])
         e = out["episodes"]
         for i in range(len(e["slot"])):
             if e["outcome"][i] == 3:

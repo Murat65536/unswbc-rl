@@ -29,8 +29,12 @@ int main()
         memory.Update(view);
         int const action = core::CarefulAction(view, core::CarefulNoise(rng), &memory);
         std::string const reply = core::FormatCommand(core::Decode(view, action));
-        std::fputs(reply.c_str(), stdout);
-        std::fputs("\nENDTURN\n", stdout);
+        if (!reply.empty())
+        {
+            std::fputs(reply.c_str(), stdout);
+            std::fputs("\n", stdout);
+        }
+        std::fputs("ENDTURN\n", stdout);
         std::fflush(stdout);
     }
     return 0;

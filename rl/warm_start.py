@@ -1,10 +1,13 @@
-"""Starting a run from a checkpoint made for an older observation layout.
+"""Starting a run from a checkpoint made for an older observation layout, or
+an older action set.
 
 core/features.h only ever appends features: new planes after the planes, new
 scalars after the scalars. So an older actor or critic is widened by giving
 each new input zero weight: it computes exactly what it did before (the
 integer actor too, since a zero column changes no row's quantisation scale),
-and training takes the new inputs up from there.
+and training takes the new inputs up from there. New actions are appended
+too; each gets a zero row and a bias below the old split's, so the policy
+starts out taking them rarely and learns when they pay.
 
     python -m rl.train --init-from checkpoints/run3/ckpt_000540.pt ...
 """
@@ -48,10 +51,22 @@ def _widen(weight: torch.Tensor, where: np.ndarray, width: int) -> torch.Tensor:
     return out
 
 
+# The split action, whose bias new actions start from (core/features.h).
+SPLIT_ACTION = 12
+NEW_ACTION_HANDICAP = 2.0
+
+
 def widen_actor(state_dict: dict, where: np.ndarray) -> dict:
     out = dict(state_dict)
     out["layers.0.weight"] = _widen(state_dict["layers.0.weight"], where, bccore.OBS_SIZE)
     out["scales"] = torch.as_tensor(bccore.feature_scales(), dtype=torch.float32)
+    last = max(int(k.split(".")[1]) for k in state_dict if k.startswith("layers.") and k.endswith(".weight"))
+    weight, bias = state_dict[f"layers.{last}.weight"], state_dict[f"layers.{last}.bias"]
+    extra = bccore.NUM_ACTIONS - weight.shape[0]
+    if extra > 0:
+        out[f"layers.{last}.weight"] = torch.cat([weight, weight.new_zeros(extra, weight.shape[1])])
+        start = bias[SPLIT_ACTION] - NEW_ACTION_HANDICAP
+        out[f"layers.{last}.bias"] = torch.cat([bias, start.repeat(extra)])
     return out
 
 

@@ -20,6 +20,7 @@ from rl.warm_start import index_map, init_from, widen_actor, widen_critic  # noq
 from test_ppo import small_args  # noqa: E402
 
 OLD = (22, 38)  # bots/rl_bot_v2's layout
+OLD_ACTIONS = 13  # before shed and dissolve
 WHERE = index_map(OLD, (bccore.NUM_PLANES, bccore.NUM_SCALARS))
 
 
@@ -43,7 +44,7 @@ def test_the_old_features_keep_their_meaning():
 @pytest.mark.parametrize("qat", [False, True])
 def test_a_widened_actor_acts_as_before(qat):
     torch.manual_seed(0)
-    old = Actor(len(WHERE), bccore.NUM_ACTIONS, old_scales(), (64, 32))
+    old = Actor(len(WHERE), OLD_ACTIONS, old_scales(), (64, 32))
     old.act_max.fill_(4.0)
     new = Actor(bccore.OBS_SIZE, bccore.NUM_ACTIONS, bccore.feature_scales(), (64, 32))
     new.load_state_dict(widen_actor(old.state_dict(), WHERE))
@@ -52,7 +53,11 @@ def test_a_widened_actor_acts_as_before(qat):
     new.eval()
     codes = random_codes(256)
     with torch.no_grad():
-        assert torch.allclose(new(codes), old(codes[:, WHERE]), atol=1e-5)
+        ours, theirs = new(codes), old(codes[:, WHERE])
+        assert torch.allclose(ours[:, :OLD_ACTIONS], theirs, atol=1e-5)
+        if not qat:  # new actions start just below the split, whatever the input
+            start = old.layers[-1].bias[12] - 2.0
+            assert torch.allclose(ours[:, OLD_ACTIONS:], start.expand(256, bccore.NUM_ACTIONS - OLD_ACTIONS))
 
 
 def test_a_widened_critic_values_as_before():
@@ -69,7 +74,7 @@ def test_a_widened_critic_values_as_before():
 def test_a_trainer_starts_from_an_older_checkpoint():
     args = small_args()
     torch.manual_seed(3)
-    old = Actor(len(WHERE), bccore.NUM_ACTIONS, old_scales(), tuple(args.hidden))
+    old = Actor(len(WHERE), OLD_ACTIONS, old_scales(), tuple(args.hidden))
     critic = Critic(len(WHERE), bccore.NUM_PRIVILEGED, old_scales(), tuple(args.critic_hidden))
     state = {"actor": old.state_dict(), "critic": critic.state_dict(), "hidden": list(args.hidden),
              "obs_size": len(WHERE), "qat": False, "snapshots": [old.state_dict()]}
@@ -79,7 +84,7 @@ def test_a_trainer_starts_from_an_older_checkpoint():
     with torch.no_grad():
         trainer.actor.eval()
         old.eval()
-        assert torch.allclose(trainer.actor(codes), old(codes[:, WHERE]), atol=1e-5)
+        assert torch.allclose(trainer.actor(codes)[:, :OLD_ACTIONS], old(codes[:, WHERE]), atol=1e-5)
     assert trainer.snapshots[0]["layers.0.weight"].shape[1] == bccore.OBS_SIZE
     stats = trainer.iterate()
     assert stats["iteration"] == 1

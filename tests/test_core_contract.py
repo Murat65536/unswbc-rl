@@ -232,6 +232,8 @@ def test_actions_decode_relative_to_the_facing():
                             "MOVE SS", "MOVE SW", "MOVE SE",
                             "MOVE NN", "MOVE NE", "MOVE NW"]
     assert decode[12] == "SPLIT 3"
+    assert decode[13] == "SPLIT 2"     # shed
+    assert decode[14] == ""            # dissolve: no action at all
 
 
 def test_level_zero_rules():
@@ -252,7 +254,7 @@ def test_level_zero_rules():
                                        ("A", [(2, 2), (2, 3)])], unit_limit=2), 0)
     m.begin()
     _, (mask0, _, _) = m.features(0)
-    assert mask0[12] == 0          # the unit limit is reached
+    assert mask0[12] == 0 and mask0[13] == 0  # the unit limit is reached
 
 
 def test_level_one_sees_through_a_visible_portal():
@@ -451,3 +453,47 @@ def test_allies_keep_out_of_the_queens_way():
     forward, right, left = 0, 1, 2
     assert mask1[forward] == 1 and mask2[forward] == 0
     assert mask2[right] == 1 and mask2[left] == 1
+
+
+SPLIT, SHED, DISSOLVE = 12, 13, 14
+
+
+@pytest.mark.parametrize("length,sheds", [(5, False), (6, True)])
+def test_the_queen_sheds_to_grow_its_team(length, sheds):
+    # A queen alone in open water: from length 6 it may shed two segments
+    # (SPLIT 2) beside its moves; the half split stays a last resort.
+    body = [(8 - i, 8) for i in range(length)]
+    m = solo(body)
+    _, (mask0, mask1, mask2) = m.features(0)
+    assert mask0[SHED] == 1 and mask1[SHED] == 1
+    assert mask2[SHED] == (1 if sheds else 0)
+    assert mask2[SPLIT] == 0 and mask2[:3].any()
+    assert not m.probe(SHED)
+    m.reply(bccore.decode_action(m.init_block(0), m.round_block(0), SHED) + "\nENDTURN\n")
+    assert len(m.dragons()[0][4]) == length - 2 and len(m.dragons()[2][4]) == 2
+
+
+def test_dissolving_only_feeds_the_queen():
+    # Dragon 2 (A, length 3), its head two steps from its queen's, may dissolve;
+    # far from it, it may not. The queen never does, and it is always death.
+    near = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 13), (14, 13)]),
+                                          ("A", [(9, 7), (9, 6), (9, 5)])]), 0)
+    far = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 13), (14, 13)]),
+                                         ("A", [(2, 2), (2, 3), (2, 4)])]), 0)
+    for m in (near, far):
+        m.begin()
+    obs, (mask0, mask1, mask2) = near.features(2)
+    assert mask0[DISSOLVE] == 1 and mask1[DISSOLVE] == 1 and mask2[DISSOLVE] == 1
+    assert scalar(obs, 55) == 1
+    obs, (_, mask1, _) = far.features(2)
+    assert mask1[DISSOLVE] == 0 and scalar(obs, 55) == 0
+    _, (_, mask1, mask2) = near.features(0)
+    assert mask1[DISSOLVE] == 0 and mask2[DISSOLVE] == 0
+    assert near.probe(DISSOLVE)
+    # Dissolving leaves its body as pearls, every second segment from the head.
+    near.reply("MOVE E\nENDTURN\n")       # the queen
+    near.reply("MOVE N\nENDTURN\n")       # B
+    near.reply("ENDTURN\n")                # dragon 2: no action
+    assert not near.dragons()[2][2]
+    pearls, _ = near.tiles()
+    assert pearls[7][9] and not pearls[6][9] and pearls[5][9]

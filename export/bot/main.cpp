@@ -51,8 +51,12 @@ int main()
         std::fputs("\n", stdout);
 #endif
         std::string const reply = core::FormatCommand(core::Decode(view, action));
-        std::fputs(reply.c_str(), stdout);
-        std::fputs("\nENDTURN\n", stdout);
+        if (!reply.empty())
+        {
+            std::fputs(reply.c_str(), stdout);
+            std::fputs("\n", stdout);
+        }
+        std::fputs("ENDTURN\n", stdout);
         std::fflush(stdout);
     }
     return 0;
