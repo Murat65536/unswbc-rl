@@ -1,6 +1,7 @@
 """Plays a bot against an opponent on the real engine, in the judge's sandbox.
 
     python -m export.evaluate --bot bots/rl_bot_v2                 # vs the C++ random starter
+    python -m export.evaluate --bot bots/rl_bot_v2 --opponent careful   # vs the careful scripted player
     python -m export.evaluate --bot bots/rl_bot_v2 --opponent bots/other --generated 12
     python -m export.evaluate --bot bots/new --opponent bots/old --sprt 0 30
 
@@ -200,7 +201,8 @@ def queen_summary(records: list[GameRecord]) -> list[str]:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bot", required=True)
-    p.add_argument("--opponent", default=None, help="a bot folder (default: the C++ random starter)")
+    p.add_argument("--opponent", default=None,
+                   help="a bot folder, or 'careful' for the careful scripted player (default: the C++ random starter)")
     p.add_argument("--no-official", action="store_true")
     p.add_argument("--generated", type=int, default=6)
     p.add_argument("--seed", type=int, default=1)
@@ -215,8 +217,16 @@ def main():
     from .gate import build_wasm
 
     with tempfile.TemporaryDirectory() as tmp:
-        opponent = pathlib.Path(args.opponent) if args.opponent else random_starter(pathlib.Path(tmp))
-        name = "random starter" if args.opponent is None else opponent.name
+        if args.opponent is None:
+            opponent, name = random_starter(pathlib.Path(tmp)), "random starter"
+        elif args.opponent == "careful":
+            from .export_bot import write_careful_bot
+
+            opponent, name = pathlib.Path(tmp) / "careful", "careful player"
+            write_careful_bot(opponent)
+        else:
+            opponent = pathlib.Path(args.opponent)
+            name = opponent.name
         wasm_bot = build_wasm(pathlib.Path(args.bot))
         wasm_opponent = build_wasm(opponent)
         engine = EngineModule()

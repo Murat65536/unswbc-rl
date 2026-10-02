@@ -24,6 +24,7 @@
 // waits for the result: its last transition completes when the game ends,
 // with the result discounted by the rounds in between.
 
+#include "core/careful.h"
 #include "core/features.h"
 #include "core/mapgen.h"
 #include "core/state_view.h"
@@ -132,14 +133,6 @@ struct EpisodeInfo
     /// Whether the scripted player was the careful one.
     int32_t mScriptedCareful = 0;
 };
-
-/// The careful scripted player's action for a View: a single step the level-2
-/// mask allows that is not onto a head (so it never trades heads, and never
-/// splits by choice), scored by the room past it (a pocket smaller than the
-/// dragon scores low), a pearl there, and how close enemy heads are (see
-/// EnemyReach), with three bits of `noise` per step breaking ties. With no
-/// such step, the first action the mask allows.
-int CarefulAction(View const& view, uint32_t noise);
 
 /// A transition that ended without a next decision: at the game's end
 /// (mBoot < 0, nothing to bootstrap) or cut at the horizon (mBoot indexes the

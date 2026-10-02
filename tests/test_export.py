@@ -58,3 +58,44 @@ def test_bot_matches_in_the_judges_sandbox(exported):
     report = run_gate(out, actor, integer, mask_level=MASK_LEVEL, games=4, sandbox=True, sandbox_turns=400)
     print(report.summary())
     assert report.passed and report.sandbox_turns > 0
+
+
+def test_the_careful_bot_plays_as_the_environment_does(tmp_path):
+    """The careful scripted player built as a bot (export/careful) replies
+    what core/careful.h gives the training environment, turn for turn, each
+    dragon with its own noise."""
+    if shutil.which("c++") is None:
+        pytest.skip("no host C++ compiler")
+    import subprocess
+
+    from export.export_bot import write_careful_bot
+    from export.gate import gate_maps
+
+    out = tmp_path / "careful"
+    write_careful_bot(out)
+    binary = tmp_path / "careful-bot"
+    subprocess.run(["c++", "-std=c++20", "-O2", "main.cpp", "-o", str(binary)], cwd=out, check=True)
+    checked = 0
+    for text, seed in gate_maps(6, seed=3):
+        match = bccore.Match(text, seed)
+        match.begin()
+        dragons = {}  # id -> [init block, round blocks, replies, generator state]
+        for _ in range(600):
+            did = match.current()
+            if did is None:
+                break
+            if did not in dragons:
+                dragons[did] = [match.init_block(did), [], [], bccore.CAREFUL_SEED]
+            d = dragons[did]
+            block = match.round_block(did)
+            noise, d[3] = bccore.careful_noise(d[3])
+            reply = bccore.decode_action(d[0], block, bccore.careful_action(d[0], block, noise))
+            d[1].append(block)
+            d[2].append(reply)
+            match.reply(reply + "\nENDTURN\n")
+        for init, blocks, replies, _ in dragons.values():
+            text_out = subprocess.run([str(binary)], input=(init + "".join(blocks)).encode(), capture_output=True,
+                                      check=True).stdout.decode()
+            assert [line for line in text_out.split("\n") if line and line != "ENDTURN"] == replies
+            checked += len(replies)
+    assert checked > 1000

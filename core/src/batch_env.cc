@@ -318,51 +318,6 @@ ControllerReply ReplyFor(Command const& command)
 
 } // namespace
 
-int CarefulAction(View const& view, uint32_t noise)
-{
-    MoveSight const sight = LookAhead(view);
-    std::array<uint8_t, kNumActions> mask{};
-    Mask(view, sight, 2, mask.data());
-    std::array<uint8_t, kTiles> const reach = EnemyReach(view);
-    int best = -1;
-    int bestScore = 0;
-    for (int a = 0; a < kSingleSteps; a++)
-    {
-        if (!mask[a] || sight.mHead[a] != kNoHead)
-        {
-            continue;
-        }
-        int const target = sight.mTarget[a];
-        int score = 40; // out of sight: no better or worse than middling
-        if (target >= 0)
-        {
-            Region const region = Explore(view, target);
-            int const room = std::min(region.mTiles, 48);
-            score = region.mOpen ? 60 + room : room >= view.mLength ? 30 + room : room;
-            score += view.mTiles[target].mPearl ? 15 : 0;
-            score -= 25 * reach[target];
-        }
-        score = score * 8 + static_cast<int>((noise >> (3 * a)) & 7);
-        if (best < 0 || score > bestScore)
-        {
-            best = a;
-            bestScore = score;
-        }
-    }
-    if (best >= 0)
-    {
-        return best;
-    }
-    for (int a = 0; a < kNumActions; a++)
-    {
-        if (mask[a])
-        {
-            return a;
-        }
-    }
-    return 0;
-}
-
 void BatchEnv::PlayScripted(Slot& slot)
 {
     GameState const& state = slot.mGame->State();
@@ -370,7 +325,7 @@ void BatchEnv::PlayScripted(Slot& slot)
     ViewFromState(state, state.mDragons[id], slot.mView);
     if (id >= static_cast<int>(slot.mScriptRng.size()))
     {
-        slot.mScriptRng.resize(id + 1, 0x853C49E6748FEA9Bull);
+        slot.mScriptRng.resize(id + 1, kCarefulSeed);
     }
     uint64_t& rng = slot.mScriptRng[id];
     auto const next = [&rng](int bound) {
@@ -379,8 +334,8 @@ void BatchEnv::PlayScripted(Slot& slot)
     };
     if (slot.mCareful)
     {
-        int const noise = next(1 << 9);
-        slot.mGame->TakeTurnWith(ReplyFor(Decode(slot.mView, CarefulAction(slot.mView, static_cast<uint32_t>(noise)))));
+        int const action = CarefulAction(slot.mView, CarefulNoise(slot.mScriptRng[id]));
+        slot.mGame->TakeTurnWith(ReplyFor(Decode(slot.mView, action)));
         slot.mTurns++;
         NoteQueens(slot);
         return;

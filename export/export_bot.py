@@ -92,6 +92,18 @@ def write_bot(integer: IntegerActor, mask_level: int, out_dir: pathlib.Path, sou
     (out_dir / ".gitignore").write_text(".unswbc-build/\n")
 
 
+def write_careful_bot(out_dir: pathlib.Path):
+    """The careful scripted player (core/careful.h) as a bot: the training
+    environment's stronger scripted opponent, for the judge's sandbox."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "core").mkdir(exist_ok=True)
+    for name in (*SHARED, "careful.h"):
+        shutil.copyfile(CORE / name, out_dir / "core" / name)
+    shutil.copyfile(ROOT / "export" / "careful" / "main.cpp", out_dir / "main.cpp")
+    (out_dir / "bot.toml").write_text(
+        '# written by export/export_bot.py\n[project]\nlanguage = "cpp"\ninclude = [ "*.cpp", "*.h" ]\n')
+
+
 def shared_files_match(bot_dir: pathlib.Path) -> bool:
     """The bot's copies of the shared core are the files training compiles."""
     digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()  # noqa: E731

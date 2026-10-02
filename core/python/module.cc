@@ -1,6 +1,7 @@
 // Python bindings for the C++ core (module `bccore`).
 
 #include "core/batch_env.h"
+#include "core/careful.h"
 #include "core/features.h"
 #include "core/mapgen.h"
 #include "core/state_view.h"
@@ -724,6 +725,20 @@ NB_MODULE(bccore, m)
         [](std::string const& init, std::string const& round) { return Features(ViewFromBlocks(init, round)); },
         "init"_a, "round_block"_a,
         "(observation, masks) from the protocol text, as the bot computes them; masks[level] is that level's.");
+    m.def(
+        "careful_action",
+        [](std::string const& init, std::string const& round, uint32_t noise) {
+            return core::CarefulAction(ViewFromBlocks(init, round), noise);
+        },
+        "init"_a, "round_block"_a, "noise"_a, "The careful scripted player's action (core/careful.h).");
+    m.def(
+        "careful_noise",
+        [](uint64_t state) {
+            uint32_t const noise = core::CarefulNoise(state);
+            return nb::make_tuple(noise, state);
+        },
+        "state"_a, "(noise, next state) of a careful dragon's generator.");
+    m.attr("CAREFUL_SEED") = core::kCarefulSeed;
     m.def(
         "decode_action",
         [](std::string const& init, std::string const& round, int action) {
