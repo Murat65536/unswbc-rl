@@ -38,6 +38,7 @@ struct MapReader
             mState.mTiles = Array2d<Tile>(mState.mWidth, mState.mHeight);
             mState.mHorizontalEdges = Array2d<Edge>(mState.mWidth, mState.mHeight);
             mState.mVerticalEdges = Array2d<Edge>(mState.mWidth, mState.mHeight);
+            mState.mOccupant = Array2d<DragonId>(mState.mWidth, mState.mHeight, NO_DRAGON);
             return;
         }
 
@@ -186,8 +187,14 @@ struct MapReader
             Point segment;
             RUNTIME_ASSERT(fields >> segment.x >> segment.y, "DRAGON ran out of segments: " << line);
             RUNTIME_ASSERT(InBounds(segment), "DRAGON segment out of bounds: " << line);
-            RUNTIME_ASSERT(AliveDragonOccupying(mState, segment) == nullptr, "DRAGON overlaps another dragon: " << line);
+            RUNTIME_ASSERT(AliveDragonOccupying(mState, segment) == nullptr &&
+                               std::find(dragon.mBody.begin(), dragon.mBody.end(), segment) == dragon.mBody.end(),
+                           "DRAGON overlaps another dragon: " << line);
             dragon.mBody.push_back(segment);
+        }
+        for (Point const segment : dragon.mBody)
+        {
+            mState.mOccupant.At(segment) = dragon.mId;
         }
         mState.mDragons.push_back(std::move(dragon));
     }

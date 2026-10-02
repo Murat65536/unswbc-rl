@@ -224,6 +224,17 @@ struct GameState
 
     std::vector<Dragon> mDragons;
     DragonId mNextDragonId = 0;
+
+    /// The living dragon on each tile, or NO_DRAGON: kept in step with the
+    /// bodies by every move, split and death, so finding what is on a tile
+    /// costs one load rather than a walk over every body. A dragon's id is
+    /// its index in mDragons.
+    Array2d<DragonId> mOccupant;
+
+    /// Every pearl bed that owns its countdown (it, and its mirror), in the
+    /// order PearlTick visits them: listed once by InitPearlCountdowns so a
+    /// round does not have to sweep the whole board.
+    std::vector<std::array<Point, 2>> mPearlBeds;
 };
 
 enum class GameEndReason

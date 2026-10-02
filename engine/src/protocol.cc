@@ -340,7 +340,7 @@ ControllerReply ReadReply(Dragon const& dragon, std::string const& replyText, De
         {
             if (keep.mLogs)
             {
-                emit(EventDragonLog{dragon.mId, AfterSpaces(args)});
+                EMIT(emit, EventDragonLog{dragon.mId, AfterSpaces(args)});
             }
             continue;
         }
@@ -354,7 +354,7 @@ ControllerReply ReadReply(Dragon const& dragon, std::string const& replyText, De
                 dot.mTo = dot.mFrom;
                 if (keep.mDraw)
                 {
-                    emit(EventDebugDraw{dragon.mId, dot});
+                    EMIT(emit, EventDebugDraw{dragon.mId, dot});
                 }
                 continue;
             }
@@ -368,7 +368,7 @@ ControllerReply ReadReply(Dragon const& dragon, std::string const& replyText, De
             {
                 if (keep.mDraw)
                 {
-                    emit(EventDebugDraw{dragon.mId, segment});
+                    EMIT(emit, EventDebugDraw{dragon.mId, segment});
                 }
                 continue;
             }
@@ -376,7 +376,7 @@ ControllerReply ReadReply(Dragon const& dragon, std::string const& replyText, De
 
         if (keep.mParse)
         {
-            emit(EventEngineLog{dragon.mId, "can't read line: " + line});
+            EMIT(emit, EventEngineLog{dragon.mId, "can't read line: " + line});
         }
     }
     return reply;

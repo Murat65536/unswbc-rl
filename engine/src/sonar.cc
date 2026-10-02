@@ -39,7 +39,7 @@ SonarHitKind CastSonar(GameState& state, Dragon& dragon, Direction direction, ui
             kind = isHead ? SonarHitKind::EnemyHead : SonarHitKind::Enemy;
         }
     }
-    emit(
-        EventSonarPing{dragon.mId, direction, value, origin, at, hit ? std::optional<DragonId>(hit->mId) : std::nullopt, kind});
+    EMIT(emit,
+         EventSonarPing{dragon.mId, direction, value, origin, at, hit ? std::optional<DragonId>(hit->mId) : std::nullopt, kind});
     return kind;
 }

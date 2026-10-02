@@ -123,3 +123,14 @@ using Event = std::variant<EventRoundStart, EventTurnStart, EventPearlCountdown,
                            EventDragonSplit, EventDragonDeath, EventSonarPing>;
 
 using EventSink = std::function<void(Event const&)>;
+
+/// Builds and emits an event only when the sink is set: a training game runs
+/// with no sink, and skips constructing its events entirely.
+#define EMIT(sink, ...)                                                                                                        \
+    do                                                                                                                         \
+    {                                                                                                                          \
+        if (sink)                                                                                                              \
+        {                                                                                                                      \
+            (sink)(__VA_ARGS__);                                                                                               \
+        }                                                                                                                      \
+    } while (0)

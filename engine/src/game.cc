@@ -128,10 +128,15 @@ void Game::Begin()
 {
     RUNTIME_ASSERT(!mBegun, "the game has already begun");
     mBegun = true;
+    if (!mKeep.mRecord && !mSink)
+    {
+        // Nobody keeps or hears the events, so none are built at all.
+        mEmit = nullptr;
+    }
     InitPearlCountdowns(mState, mRng, mEmit);
     for (Dragon const& dragon : mState.mDragons)
     {
-        mEmit(EventDragonUpdate{dragon.mId, dragon.mFacing, dragon.mBody.front(), dragon.mBody.back()});
+        EMIT(mEmit, EventDragonUpdate{dragon.mId, dragon.mFacing, dragon.mBody.front(), dragon.mBody.back()});
     }
 
     mState.mRound = 0;
@@ -141,7 +146,7 @@ void Game::Begin()
 
 void Game::StartRound()
 {
-    mEmit(EventRoundStart{mState.mRound});
+    EMIT(mEmit, EventRoundStart{mState.mRound});
     PearlTick(mState, mRng, mEmit);
     mTurnIndex = 0;
 }
@@ -209,7 +214,7 @@ GameResult const& Game::Result() const
 
 void Game::StartTurn(Dragon& dragon)
 {
-    mEmit(EventTurnStart{dragon.mId});
+    EMIT(mEmit, EventTurnStart{dragon.mId});
     dragon.mSonarInbox.clear();
     dragon.mSonarEchoes = {};
 }
@@ -240,9 +245,9 @@ void Game::FinishTurn(DragonId id, ControllerReply const& reply)
 
     if (reply.mIndicator)
     {
-        mEmit(EventDragonIndicator{id, *reply.mIndicator});
+        EMIT(mEmit, EventDragonIndicator{id, *reply.mIndicator});
     }
-    mEmit(EventDragonAction{id, mTurnTle ? std::nullopt : std::optional<PlayerAction>(reply.mAction), mTurnInstructions,
+    EMIT(mEmit, EventDragonAction{id, mTurnTle ? std::nullopt : std::optional<PlayerAction>(reply.mAction), mTurnInstructions,
                             mTurnTle});
 
     if (ActionMove const* move = std::get_if<ActionMove>(&reply.mAction))

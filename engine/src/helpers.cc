@@ -126,14 +126,8 @@ std::optional<Direction> DirectionOfStepBetween(GameState const& state, Point fr
 
 Dragon const* AliveDragonOccupying(GameState const& state, Point tile)
 {
-    for (Dragon const& dragon : state.mDragons)
-    {
-        if (dragon.mAlive && std::find(dragon.mBody.begin(), dragon.mBody.end(), tile) != dragon.mBody.end())
-        {
-            return &dragon;
-        }
-    }
-    return nullptr;
+    DragonId const id = state.mOccupant.At(tile);
+    return id == NO_DRAGON ? nullptr : &state.mDragons[id];
 }
 
 Dragon* AliveDragonOccupying(GameState& state, Point tile)
@@ -143,6 +137,10 @@ Dragon* AliveDragonOccupying(GameState& state, Point tile)
 
 Dragon* DragonById(GameState& state, DragonId id)
 {
+    if (id >= 0 && id < static_cast<int>(state.mDragons.size()) && state.mDragons[id].mId == id)
+    {
+        return &state.mDragons[id];
+    }
     for (Dragon& dragon : state.mDragons)
     {
         if (dragon.mId == id)

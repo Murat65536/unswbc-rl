@@ -23,7 +23,7 @@ static bool OwnsSharedCountdown(GameState const& state, Point bed, Point mirror)
 static void SetCountdown(GameState& state, Point bed, int gap, EventSink const& emit)
 {
     state.mTiles.At(bed).mNextPearl = gap;
-    emit(EventPearlCountdown{bed, gap});
+    EMIT(emit, EventPearlCountdown{bed, gap});
 }
 
 static void TrySpawnPearl(GameState& state, Point bed, EventSink const& emit)
@@ -35,11 +35,12 @@ static void TrySpawnPearl(GameState& state, Point bed, EventSink const& emit)
     }
 
     tile.mHasPearl = true;
-    emit(EventTileChange{bed, true});
+    EMIT(emit, EventTileChange{bed, true});
 }
 
 void InitPearlCountdowns(GameState& state, PearlRng& rng, EventSink const& emit)
 {
+    state.mPearlBeds.clear();
     for (int y = 0; y < state.mHeight; y++)
     {
         for (int x = 0; x < state.mWidth; x++)
@@ -50,6 +51,7 @@ void InitPearlCountdowns(GameState& state, PearlRng& rng, EventSink const& emit)
             {
                 continue;
             }
+            state.mPearlBeds.push_back({bed, mirror});
 
             int const gap = DrawRespawnGap(state.mTiles.At(bed), rng);
             SetCountdown(state, bed, gap, emit);
@@ -63,37 +65,29 @@ void InitPearlCountdowns(GameState& state, PearlRng& rng, EventSink const& emit)
 
 void PearlTick(GameState& state, PearlRng& rng, EventSink const& emit)
 {
-    for (int y = 0; y < state.mHeight; y++)
+    // The beds InitPearlCountdowns listed, in the same top-to-bottom,
+    // left-to-right order, so the draws come out the same.
+    for (auto const& [bed, mirror] : state.mPearlBeds)
     {
-        for (int x = 0; x < state.mWidth; x++)
+        int const remaining = state.mTiles.At(bed).mNextPearl - 1;
+        state.mTiles.At(bed).mNextPearl = remaining;
+        state.mTiles.At(mirror).mNextPearl = remaining;
+        if (remaining > 0)
         {
-            Point const bed{x, y};
-            Point const mirror = MirrorTile(state, bed);
-            if (!OwnsSharedCountdown(state, bed, mirror) || !state.mTiles.At(bed).mSpawnsPearls)
-            {
-                continue;
-            }
+            continue;
+        }
 
-            int const remaining = state.mTiles.At(bed).mNextPearl - 1;
-            state.mTiles.At(bed).mNextPearl = remaining;
-            state.mTiles.At(mirror).mNextPearl = remaining;
-            if (remaining > 0)
-            {
-                continue;
-            }
+        TrySpawnPearl(state, bed, emit);
+        if (mirror != bed)
+        {
+            TrySpawnPearl(state, mirror, emit);
+        }
 
-            TrySpawnPearl(state, bed, emit);
-            if (mirror != bed)
-            {
-                TrySpawnPearl(state, mirror, emit);
-            }
-
-            int const gap = DrawRespawnGap(state.mTiles.At(bed), rng);
-            SetCountdown(state, bed, gap, emit);
-            if (mirror != bed)
-            {
-                SetCountdown(state, mirror, gap, emit);
-            }
+        int const gap = DrawRespawnGap(state.mTiles.At(bed), rng);
+        SetCountdown(state, bed, gap, emit);
+        if (mirror != bed)
+        {
+            SetCountdown(state, mirror, gap, emit);
         }
     }
 }

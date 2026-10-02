@@ -46,3 +46,22 @@ engines and requires identical turn blocks, deaths, splits and results.
    `CurrentDragon()` and `TakeTurnWith(reply)` play the game one turn per call
    without controllers, for the training environment. `Run()` is now built on
    the same cursor, so both paths share one round loop.
+
+### Speed
+
+6. **O(1) board lookups** (`GameState::mOccupant`, `helpers.cc`, `actions.cc`,
+   `config.cc`). An occupancy grid, kept in step by every move, split and
+   death, answers `AliveDragonOccupying` and the self-collision check with one
+   load instead of a walk over every body; `DragonById` indexes directly (a
+   dragon's id is its index). `LoadMap` now also rejects a dragon that
+   overlaps itself, which the grid cannot represent (no real map does).
+7. **No events nobody hears** (`EMIT` in `event.h`). With no sink and
+   `mRecord` off, `Game` drops its event sink and no event is built.
+8. **Pearl beds listed once** (`GameState::mPearlBeds`, `pearls.cc`).
+   `InitPearlCountdowns` lists the beds that own a countdown, in board order,
+   and `PearlTick` walks that list instead of the whole board, drawing in the
+   same order.
+
+Together these take the engine from about 0.4M to about 3M turns a second on
+one core (32×32 boards, eight dragons and their children), with every game
+unchanged: `tests/test_fidelity.py` still matches the judge turn for turn.

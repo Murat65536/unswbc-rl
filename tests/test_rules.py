@@ -212,3 +212,29 @@ def test_round_limit_queen_decides_before_longest():
     assert result["a_queen"] == 0 and result["b_queen"] == 3
     assert result["a_longest"] == 5 > result["b_longest"]
     assert result["winner"] == "B"
+
+
+def test_occupancy_grid_tracks_every_body():
+    """The engine finds what is on a tile through a grid it keeps in step with
+    the bodies; check it before every turn of games full of moves, sprints,
+    splits, portals and deaths."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    import lockstep
+
+    turns = 0
+    for seed in range(40):
+        text = bccore.generate_map(24, 24, ["x", "y", "xy"][seed % 3], seed=seed, dragons_per_team=3,
+                                   portal_pairs=3, unit_limit=8)
+        styles = [("chaotic", "splitter"), ("survivor", "sprinter"), ("mixed", "careful")][seed % 3]
+        players = lockstep.Players(seed, styles)
+        m = bccore.Match(text, seed)
+
+        def reply(did, block):
+            nonlocal turns
+            m.check_invariants()
+            turns += 1
+            return players.reply(did, block)
+
+        m.run(reply, spawn=players.spawn)
+        m.check_invariants()
+    assert turns > 3000

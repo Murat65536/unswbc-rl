@@ -72,22 +72,38 @@ class Match
 
     nb::dict Run(nb::callable reply, nb::object spawn, nb::object death)
     {
+        // The game keeps its controllers as std::functions, which Python's
+        // garbage collector cannot see into: they capture only `this`, and
+        // the callables live here for the length of the run, so a callback
+        // that refers back to this match is not a leaked cycle.
+        mReply = reply;
+        mSpawn = spawn;
+        mDeath = death;
+        struct Release
+        {
+            Match& mMatch;
+            ~Release()
+            {
+                mMatch.mReply = mMatch.mSpawn = mMatch.mDeath = nb::none();
+            }
+        } release{*this};
+
         if (!death.is_none())
         {
-            mGame->OnEvent([this, death](Event const& event) {
+            mGame->OnEvent([this](Event const& event) {
                 if (auto const* dead = std::get_if<EventDragonDeath>(&event))
                 {
-                    death(dead->mId, mGame->State().mRound, std::string(1, static_cast<char>(dead->mReason)));
+                    mDeath(dead->mId, mGame->State().mRound, std::string(1, static_cast<char>(dead->mReason)));
                 }
             });
         }
-        mGame->SpawnControllersWith([this, reply, spawn](Dragon const& dragon) -> DragonFn {
-            if (!spawn.is_none())
+        mGame->SpawnControllersWith([this](Dragon const& dragon) -> DragonFn {
+            if (!mSpawn.is_none())
             {
-                spawn(dragon.mId, BuildInitBlock(mGame->State(), dragon));
+                mSpawn(dragon.mId, BuildInitBlock(mGame->State(), dragon));
             }
             DragonId const id = dragon.mId;
-            return [reply, id](std::string const& block) { return nb::cast<std::string>(reply(id, block)); };
+            return [this, id](std::string const& block) { return nb::cast<std::string>(mReply(id, block)); };
         });
         GameResult const result = mGame->Run();
         return ResultDict(result, mGame->State().mRound);
@@ -205,6 +221,43 @@ class Match
         return mGame->State();
     }
 
+    /// Raises unless the occupancy grid holds exactly the living bodies.
+    void CheckInvariants() const
+    {
+        GameState const& state = mGame->State();
+        Array2d<DragonId> expected(state.mWidth, state.mHeight, NO_DRAGON);
+        for (Dragon const& dragon : state.mDragons)
+        {
+            if (dragon.mId != static_cast<int>(&dragon - state.mDragons.data()))
+            {
+                throw std::runtime_error("dragon ids are not their indices");
+            }
+            if (!dragon.mAlive)
+            {
+                continue;
+            }
+            for (Point const segment : dragon.mBody)
+            {
+                if (expected.At(segment) != NO_DRAGON)
+                {
+                    throw std::runtime_error("two living segments share a tile");
+                }
+                expected.At(segment) = dragon.mId;
+            }
+        }
+        for (int y = 0; y < state.mHeight; y++)
+        {
+            for (int x = 0; x < state.mWidth; x++)
+            {
+                if (expected.At(x, y) != state.mOccupant.At(x, y))
+                {
+                    throw std::runtime_error("occupancy grid is wrong at (" + std::to_string(x) + ", " +
+                                             std::to_string(y) + ")");
+                }
+            }
+        }
+    }
+
   private:
     Dragon const& Find(int id) const
     {
@@ -217,6 +270,9 @@ class Match
     }
 
     std::unique_ptr<Game> mGame;
+    nb::object mReply = nb::none();
+    nb::object mSpawn = nb::none();
+    nb::object mDeath = nb::none();
 };
 
 } // namespace
@@ -271,6 +327,7 @@ NB_MODULE(bccore, m)
         .def("dragons", &Match::Dragons)
         .def("tiles", &Match::Tiles)
         .def("set_pearl", &Match::SetPearl, "x"_a, "y"_a, "present"_a = true)
+        .def("check_invariants", &Match::CheckInvariants)
         .def_prop_ro("round", [](Match const& self) { return self.State().mRound; })
         .def_prop_ro("width", [](Match const& self) { return self.State().mWidth; })
         .def_prop_ro("height", [](Match const& self) { return self.State().mHeight; })
