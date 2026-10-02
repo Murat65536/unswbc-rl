@@ -42,23 +42,27 @@ version of the same network.
   boards), and about 0.65M full decisions per second (observation, masks,
   critic features and rewards included) from the batched environment on
   this 4-core machine (`python -m rl.bench_env`). Training on CPU here runs
-  at about 14k decisions per second end to end: PyTorch, not the
-  environment, is the bottleneck.
+  at about 30k decisions per second end to end (1024 games, 64-step
+  rollouts): PyTorch, not the environment, is the bottleneck.
 - **Bot.** The export gate holds the bot to the trained actor on every
   recorded turn, built natively and by the judge's clang in the judge's
-  metered sandbox: same observation, same action. A turn costs about 4M of
-  the 100M points (2.5M of that is the single write), 0.6 MB of memory, and
-  the zip is about 420 KB.
-- **Strength.** `bots/rl_bot_v2` (about 35M training decisions, roughly an
-  hour of iteration time on this 4-core CPU: 360 iterations of self-play
-  with the league and level replay, then 180 more with a quarter of the
-  games against the scripted random-safe player) beats the toolkit's
-  random starter in 106 of 108 games on the 15 official maps and 12
-  generated ones, both sides, two seeds, with no bot errors. Both losses
-  are trauma as team A, a round-limit tiebreak: the bot splits into many
-  short dragons and loses its queen in the maze, and the starter's single
-  dragon ends up the longest. `bots/rl_bot_v1` is the earlier NumPy bot,
-  kept as a baseline.
+  metered sandbox: same observation, same action. A turn costs about 4.1M
+  of the 100M points (2.5M of that is the single write), 0.6 MB of memory,
+  and the zip is about 460 KB.
+- **Strength.** `bots/rl_bot_v3` (v2's weights widened to the current
+  observation, then 700 iterations, about 46M more decisions, at mask
+  level 2 with the league, level replay and scripted opponents, most of
+  them the careful player; `models/rl_bot_v3.pt`) in the judge's sandbox,
+  with no bot errors:
+  - beats v2 in 151 of 162 games head to head (about +455 Elo);
+  - beats the toolkit's random starter in all 108 games on the 15 official
+    maps and 12 generated ones, both sides, two seeds (v2: 106);
+  - beats the careful scripted player in 45 of 54 (v2: 31).
+
+  Its queen dies in 28 of the 108 games against the starter (v2: 65), 12
+  of them on three maps where each queen starts in a dead end.
+  `bots/rl_bot_v2` and the earlier NumPy `bots/rl_bot_v1` are kept as
+  baselines.
 
 ## Setup
 
