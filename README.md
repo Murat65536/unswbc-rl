@@ -104,12 +104,14 @@ Seeded with the match seed, a game here is the judge's game, pearls and all.
 reader for the wire protocol. **`features.h`** computes everything else from a
 View only:
 
-- an egocentric observation of 1110 uint8 codes: 22 planes over the 7×7
+- an egocentric observation of 1116 uint8 codes: 22 planes over the 7×7
   window rotated so the dragon faces up (pearls, countdowns, kelp and
   portals by relative side, own/ally/enemy heads and bodies with their
-  relative headings), then 32 scalars (length, free sprint steps, units,
-  round, queen, split legality, and per-move flags: visibly fatal, pearl,
-  enemy or ally head, out of sight);
+  relative headings), then 38 scalars (length, free sprint steps, units,
+  round, queen, split legality, per-move flags: visibly fatal, pearl,
+  enemy or ally head, out of sight; and, past each first step, how many
+  tiles are reachable within the window and whether that region goes on
+  out of sight, so pockets that would trap the dragon show up);
 - 13 relative actions: one step forward/right/left, two steps (each
   forward/right/left, free from length 5), and splitting off the rear half;
 - masks: level 0 only removes an illegal split; level 1 also removes moves
