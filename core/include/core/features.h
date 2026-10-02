@@ -11,6 +11,7 @@
 
 #include "view.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -275,100 +276,117 @@ inline int OwnTail(View const& view)
     return kUnknown;
 }
 
-// ---------------------------------------------------------------------------
-// Masks.
-//
-// Level 0 masks only what the rules make certain death whatever the board:
-// an illegal split (child or parent under 2, or the unit limit reached).
-//
-// Level 1 also masks moves the dragon can see are certain death: a step into
-// kelp, or onto a dragon segment that is not another dragon's head, at the
-// first or the second step (for the second, its own tail has moved on unless
-// the first step ate a pearl), and a two-step move at length 2 unless the
-// first step eats a pearl (otherwise it cannot pay for the second). It also
-// masks ending a move on an ally's head, which kills two of the team's
-// dragons for nothing. (An enemy's head is a trade, and the policy's call.)
-// Steps whose landing tile is out of sight are never masked.
-//
-// Level 2 also protects the queen, which decides the first round-limit
-// tiebreak (a dead queen has length 0): the queen never ends a move on
-// another dragon's head, and splits (which halves it) only when no other move
-// is left at level 1, since the split is then the only way it survives.
-//
-// When a level would mask every action, the level below it is used.
-
-constexpr int kMaskLevels = 3;
-
-struct MoveSight
+/// For each window tile holding one of this dragon's own segments, after
+/// how many moves it is gone (the tail after 1, the segment before it after
+/// 2, ...: L - its index from the head), following the chain of segments
+/// back from the head while it stays in sight; 0 elsewhere, and where that
+/// cannot be told.
+inline std::array<uint8_t, kTiles> OwnFreeTimes(View const& view)
 {
-    std::array<int, kSingleSteps> mTarget{};
-    std::array<bool, kNumActions> mVisiblyFatal{};
-    /// The move ends on another dragon's head (kEnemyHead or kAllyHead).
-    std::array<uint8_t, kNumActions> mHead{};
-    /// The window tile the head ends on, when that is in sight and the move
-    /// is neither visibly fatal nor a trade; -1 otherwise.
-    std::array<int8_t, kNumActions> mLanding{};
-};
-
-inline MoveSight LookAhead(View const& view)
-{
-    MoveSight sight;
-    sight.mLanding.fill(-1);
-    int const tail = OwnTail(view);
-    for (int i = 0; i < kSingleSteps; i++)
+    std::array<uint8_t, kTiles> frees{};
+    std::array<int8_t, kTiles> behind;
+    behind.fill(-1);
+    for (int tile = 0; tile < kTiles; tile++)
     {
-        int const first = ToWorld(view.mFacing, kTurns[i]);
-        int const t1 = StepTarget(view, kHeadTile, first);
-        sight.mTarget[i] = t1;
-        bool const fatal1 = t1 == kBlocked || (t1 >= 0 && Fatal(view, view.mTiles[t1].mPart));
-        sight.mVisiblyFatal[i] = fatal1;
-        sight.mHead[i] = t1 >= 0 ? HeadKind(view, view.mTiles[t1].mPart) : kNoHead;
-        if (t1 >= 0 && !fatal1 && sight.mHead[i] == kNoHead)
+        PartView const& part = view.mTiles[tile].mPart;
+        if (Mine(view, part) && !part.mHead)
         {
-            sight.mLanding[i] = static_cast<int8_t>(t1);
-        }
-        // Dying at the first step (or trading heads there) ends the move.
-        bool const stops1 = fatal1 || (t1 >= 0 && view.mTiles[t1].mPart.mId >= 0);
-        for (int j = 0; j < 3; j++)
-        {
-            int const action = kSingleSteps + 3 * i + j;
-            if (stops1)
+            int const next = StepTarget(view, tile, part.mDir);
+            if (next >= 0)
             {
-                sight.mVisiblyFatal[action] = true;
-                continue;
-            }
-            if (t1 < 0)
-            {
-                continue;
-            }
-            if (view.mLength < 3 && !view.mTiles[t1].mPearl)
-            {
-                // Length 2 pays for the second step with its life.
-                sight.mVisiblyFatal[action] = true;
-                continue;
-            }
-            int const second = ToWorld(first, kTurns[j]);
-            int const t2 = StepTarget(view, t1, second);
-            if (t2 == kBlocked)
-            {
-                sight.mVisiblyFatal[action] = true;
-                continue;
-            }
-            if (t2 < 0)
-            {
-                continue;
-            }
-            PartView const& part = view.mTiles[t2].mPart;
-            bool const tailMoved = t2 == tail && !view.mTiles[t1].mPearl;
-            sight.mVisiblyFatal[action] = Fatal(view, part) && !tailMoved;
-            sight.mHead[action] = HeadKind(view, part);
-            if (!sight.mVisiblyFatal[action] && sight.mHead[action] == kNoHead)
-            {
-                sight.mLanding[action] = static_cast<int8_t>(t2);
+                behind[next] = static_cast<int8_t>(tile);
             }
         }
     }
-    return sight;
+    int at = kHeadTile;
+    for (int index = 1; index < view.mLength && behind[at] >= 0; index++)
+    {
+        at = behind[at];
+        int const gone = view.mLength - index;
+        frees[at] = static_cast<uint8_t>(gone < 255 ? gone : 255);
+    }
+    return frees;
+}
+
+/// What lies past window tile `start` (where a first step would land),
+/// explored by plain steps through open edges within the window: how many
+/// tiles the head could get to (start included), and whether the region goes
+/// on out of sight (an open edge leaving the window, or a portal). Other
+/// dragons' segments are walls; the dragon's own are walls only until they
+/// are gone (see OwnFreeTimes), so following its own tail is room and a coil
+/// closing in is not. A small count that goes nowhere is a pocket the dragon
+/// would trap itself in.
+struct Region
+{
+    int mTiles = 0;
+    bool mOpen = false;
+};
+
+inline Region Explore(View const& view, int start, std::array<uint8_t, kTiles> const& frees)
+{
+    Region region;
+    if (start < 0 || view.mTiles[start].mPart.mId >= 0)
+    {
+        return region;
+    }
+    // Tiles by the move the head could first stand on them (Dijkstra with
+    // unit steps: a segment of its own can be entered once it is gone).
+    constexpr int kHorizon = 48;
+    std::array<bool, kTiles> seen{};
+    std::array<std::array<uint8_t, kTiles>, kHorizon + 1> bucket;
+    std::array<uint8_t, kHorizon + 1> count{};
+    seen[start] = true;
+    bucket[1][count[1]++] = static_cast<uint8_t>(start);
+    int reached = 0;
+    for (int t = 1; t <= kHorizon; t++)
+    {
+        for (int i = 0; i < count[t]; i++)
+        {
+            int const tile = bucket[t][i];
+            reached++;
+            for (int side = 0; side < 4; side++)
+            {
+                EdgeView const& edge = view.mTiles[tile].mEdges[side];
+                if (edge.mKind == kKelp)
+                {
+                    continue;
+                }
+                int const next = edge.mKind == kOpen ? NeighbourInWindow(tile, side) : -1;
+                if (next < 0)
+                {
+                    region.mOpen = true; // out of the window, or through a portal
+                    continue;
+                }
+                if (seen[next])
+                {
+                    continue;
+                }
+                PartView const& part = view.mTiles[next].mPart;
+                int arrive = t + 1;
+                if (part.mId >= 0)
+                {
+                    if (!Mine(view, part) || frees[next] == 0)
+                    {
+                        continue;
+                    }
+                    // The head may not enter a tile its own segment still holds.
+                    arrive = std::max(arrive, frees[next] + 1);
+                }
+                if (arrive <= kHorizon)
+                {
+                    seen[next] = true;
+                    bucket[arrive][count[arrive]++] = static_cast<uint8_t>(next);
+                }
+            }
+        }
+    }
+    region.mTiles = reached;
+    return region;
+}
+
+inline Region Explore(View const& view, int start)
+{
+    return Explore(view, start, OwnFreeTimes(view));
 }
 
 /// For each window tile, how soon a visible enemy head could move onto it on
@@ -420,56 +438,141 @@ inline std::array<uint8_t, kTiles> EnemyReach(View const& view)
     return reach;
 }
 
-/// What lies past window tile `start` (where a first step would land),
-/// explored by plain steps through open edges onto tiles with no dragon on
-/// them, within the window: how many tiles (start included), and whether
-/// the region goes on out of sight (an open edge leaving the window, or a
-/// portal). A small count that goes nowhere is a pocket the dragon would
-/// trap itself in.
-struct Region
+// ---------------------------------------------------------------------------
+// Masks.
+//
+// Level 0 masks only what the rules make certain death whatever the board:
+// an illegal split (child or parent under 2, or the unit limit reached).
+//
+// Level 1 also masks moves the dragon can see are certain death: a step into
+// kelp, or onto a dragon segment that is not another dragon's head, at the
+// first or the second step (for the second, its own tail has moved on unless
+// the first step ate a pearl), and a two-step move at length 2 unless the
+// first step eats a pearl (otherwise it cannot pay for the second). It also
+// masks ending a move on an ally's head, which kills two of the team's
+// dragons for nothing. (An enemy's head is a trade, and the policy's call.)
+// Steps whose landing tile is out of sight are never masked.
+//
+// Level 2 also shields the queen, which decides the first round-limit
+// tiebreak (a dead queen has length 0). Of its level-1 moves that do not end
+// on another dragon's head, it keeps the first non-empty tier of: those into
+// open water (the region past the first step goes on out of sight, see
+// Explore) that end where no enemy head is one step away; those into open
+// water; those into a closed region with more room than the queen; all of
+// them. (A closed region is a trap sooner or later: in a dead end, a queen
+// of any length dies.) Only with none of those may it split (which halves
+// it, but it survives), and only with no split either is it left level 1's
+// choices.
+//
+// When a level would mask every action, the level below it is used, but a
+// dragon with nothing but fatal moves still avoids taking an ally with it.
+
+constexpr int kMaskLevels = 3;
+
+struct MoveSight
 {
-    int mTiles = 0;
-    bool mOpen = false;
+    std::array<int, kSingleSteps> mTarget{};
+    std::array<bool, kNumActions> mVisiblyFatal{};
+    /// The move ends on another dragon's head (kEnemyHead or kAllyHead).
+    std::array<uint8_t, kNumActions> mHead{};
+    /// The window tile the head ends on, when that is in sight and the move
+    /// is neither visibly fatal nor a trade; -1 otherwise.
+    std::array<int8_t, kNumActions> mLanding{};
+    /// What lies past each first step F/R/L (Explore).
+    std::array<Region, kSingleSteps> mRegion{};
+    /// How soon an enemy head could reach where each move ends (EnemyReach at
+    /// mLanding; 0 with no landing tile), and the head's tile now.
+    std::array<uint8_t, kNumActions> mReach{};
+    uint8_t mReachHere = 0;
 };
 
-inline Region Explore(View const& view, int start)
+inline MoveSight LookAhead(View const& view)
 {
-    Region region;
-    if (start < 0 || view.mTiles[start].mPart.mId >= 0)
+    MoveSight sight;
+    sight.mLanding.fill(-1);
+    int const tail = OwnTail(view);
+    for (int i = 0; i < kSingleSteps; i++)
     {
-        return region;
-    }
-    std::array<bool, kTiles> seen{};
-    std::array<uint8_t, kTiles> queue{};
-    int head = 0;
-    int tail = 0;
-    seen[start] = true;
-    queue[tail++] = static_cast<uint8_t>(start);
-    while (head < tail)
-    {
-        int const tile = queue[head++];
-        for (int side = 0; side < 4; side++)
+        int const first = ToWorld(view.mFacing, kTurns[i]);
+        int const t1 = StepTarget(view, kHeadTile, first);
+        sight.mTarget[i] = t1;
+        bool const fatal1 = t1 == kBlocked || (t1 >= 0 && Fatal(view, view.mTiles[t1].mPart));
+        sight.mVisiblyFatal[i] = fatal1;
+        sight.mHead[i] = t1 >= 0 ? HeadKind(view, view.mTiles[t1].mPart) : kNoHead;
+        if (t1 >= 0 && !fatal1 && sight.mHead[i] == kNoHead)
         {
-            EdgeView const& edge = view.mTiles[tile].mEdges[side];
-            if (edge.mKind == kKelp)
+            sight.mLanding[i] = static_cast<int8_t>(t1);
+        }
+        // Dying at the first step (or trading heads there) ends the move.
+        bool const stops1 = fatal1 || (t1 >= 0 && view.mTiles[t1].mPart.mId >= 0);
+        for (int j = 0; j < 3; j++)
+        {
+            int const action = kSingleSteps + 3 * i + j;
+            if (stops1)
+            {
+                sight.mVisiblyFatal[action] = true;
+                sight.mHead[action] = sight.mHead[i];
+                continue;
+            }
+            if (t1 < 0)
             {
                 continue;
             }
-            int const next = edge.mKind == kOpen ? NeighbourInWindow(tile, side) : -1;
-            if (next < 0)
+            if (view.mLength < 3 && !view.mTiles[t1].mPearl)
             {
-                region.mOpen = true; // out of the window, or through a portal
+                // Length 2 pays for the second step with its life.
+                sight.mVisiblyFatal[action] = true;
                 continue;
             }
-            if (!seen[next] && view.mTiles[next].mPart.mId < 0)
+            int const second = ToWorld(first, kTurns[j]);
+            int const t2 = StepTarget(view, t1, second);
+            if (t2 == kBlocked)
             {
-                seen[next] = true;
-                queue[tail++] = static_cast<uint8_t>(next);
+                sight.mVisiblyFatal[action] = true;
+                continue;
+            }
+            if (t2 < 0)
+            {
+                continue;
+            }
+            PartView const& part = view.mTiles[t2].mPart;
+            bool const tailMoved = t2 == tail && !view.mTiles[t1].mPearl;
+            sight.mVisiblyFatal[action] = Fatal(view, part) && !tailMoved;
+            sight.mHead[action] = HeadKind(view, part);
+            if (!sight.mVisiblyFatal[action] && sight.mHead[action] == kNoHead)
+            {
+                sight.mLanding[action] = static_cast<int8_t>(t2);
             }
         }
     }
-    region.mTiles = tail;
-    return region;
+    std::array<uint8_t, kTiles> const frees = OwnFreeTimes(view);
+    for (int i = 0; i < kSingleSteps; i++)
+    {
+        sight.mRegion[i] = Explore(view, sight.mTarget[i], frees);
+    }
+    std::array<uint8_t, kTiles> const reach = EnemyReach(view);
+    for (int a = 0; a < kSplitAction; a++)
+    {
+        sight.mReach[a] = sight.mLanding[a] >= 0 ? reach[sight.mLanding[a]] : 0;
+    }
+    sight.mReachHere = reach[kHeadTile];
+    return sight;
+}
+
+/// How much room the first step of this move leads into: 2 open water (the
+/// region past it goes on out of sight; a step out of sight, or onto its own
+/// moving tail, counts too), 1 a closed region with more room than the
+/// dragon, 0 a smaller one: a pocket.
+inline int Room(View const& view, MoveSight const& sight, int action)
+{
+    int const first = action < kSingleSteps ? action : (action - kSingleSteps) / 3;
+    int const target = sight.mTarget[first];
+    Region const& region = sight.mRegion[first];
+    if (target < 0 || view.mTiles[target].mPart.mId >= 0 || region.mOpen)
+    {
+        return 2;
+    }
+    return region.mTiles > view.mLength ? 1 : 0;
 }
 
 inline bool SplitLegal(View const& view)
@@ -499,25 +602,44 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
     }
     if (!any)
     {
+        // Every action is fatal: at least die alone.
+        for (int a = 0; a < kSplitAction; a++)
+        {
+            strict[a] = out[a] && sight.mHead[a] != kAllyHead ? 1 : 0;
+            any = any || strict[a];
+        }
+        if (any)
+        {
+            for (int a = 0; a < kNumActions; a++)
+            {
+                out[a] = strict[a];
+            }
+        }
         return;
     }
     if (level >= 2 && IsQueen(view.mId))
     {
-        std::array<uint8_t, kNumActions> queen{};
-        bool anyQueen = false;
-        for (int a = 0; a < kSplitAction; a++)
+        std::array<uint8_t, kNumActions> tier{};
+        bool chosen = false;
+        for (int t = 0; t < 4 && !chosen; t++)
         {
-            queen[a] = strict[a] && sight.mHead[a] == kNoHead ? 1 : 0;
-            anyQueen = anyQueen || queen[a];
+            int const room = t <= 1 ? 2 : t == 2 ? 1 : 0;
+            for (int a = 0; a < kSplitAction; a++)
+            {
+                bool ok = strict[a] && sight.mHead[a] == kNoHead && Room(view, sight, a) >= room;
+                ok = ok && (t >= 1 || sight.mReach[a] < 2);
+                tier[a] = ok ? 1 : 0;
+                chosen = chosen || ok;
+            }
         }
-        if (!anyQueen && strict[kSplitAction])
+        if (!chosen && strict[kSplitAction])
         {
-            queen[kSplitAction] = 1;
-            anyQueen = true;
+            tier[kSplitAction] = 1;
+            chosen = true;
         }
-        if (anyQueen)
+        if (chosen)
         {
-            strict = queen;
+            strict = tier;
         }
     }
     for (int a = 0; a < kNumActions; a++)
@@ -555,6 +677,7 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 //   22..30  two-step move 3..11 is visibly fatal
 //   31  two-step moves are free (L >= 5)
 //   32..34  tiles reachable past one step F/R/L within the window, min(48) / 48
+//           (its own segments counting once they are gone)
 //   35..37  and whether that region goes on out of sight (see Explore)
 //   38..49  where move 0..11 ends, an enemy head could reach next: 1 in one
 //           step, 0.5 in two (EnemyReach / 2; 0 if the move is visibly
@@ -722,16 +845,15 @@ inline void Encode(View const& view, MoveSight const& sight, uint8_t* out)
     scalars[31] = free >= 2;
     for (int i = 0; i < kSingleSteps; i++)
     {
-        Region const region = Explore(view, sight.mTarget[i]);
+        Region const& region = sight.mRegion[i];
         scalars[32 + i] = static_cast<uint8_t>(region.mTiles < 48 ? region.mTiles : 48);
         scalars[35 + i] = region.mOpen;
     }
-    std::array<uint8_t, kTiles> const reach = EnemyReach(view);
     for (int a = 0; a < kSplitAction; a++)
     {
-        scalars[38 + a] = sight.mLanding[a] >= 0 ? reach[sight.mLanding[a]] : 0;
+        scalars[38 + a] = sight.mReach[a];
     }
-    scalars[50] = reach[kHeadTile];
+    scalars[50] = sight.mReachHere;
 }
 
 inline void Encode(View const& view, uint8_t* out)

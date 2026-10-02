@@ -6,7 +6,7 @@ the same header-only code for the observation, the masks and the action
 decoding (core/features.h), so if the two Views agree, everything agrees.
 This checks that they do on every turn of scripted games on the official and
 generated maps, that the masks are sound (level 0 and level 1 never hide an
-action that could survive; level 2 adds only the queen's rules), and pins the
+action that could survive; level 2 only narrows the queen's), and pins the
 egocentric layout, the queen and threat features, and the action decoding on
 hand-built positions.
 """
@@ -90,36 +90,36 @@ def test_training_view_equals_bot_view(label, text, seed, styles):
 
 
 def test_masks_never_hide_a_move_that_survives():
-    """Every action level 0 masks, and every action level 1 masks, kills the
-    dragon when played (checked on a copy of the board). Level 2 masks more
-    only for a queen, and only its splits and head trades (which kill it)."""
-    stats = {"masked0": 0, "masked1": 0, "queen_splits": 0, "queen_trades": 0, "unmasked_fatal": 0, "turns": 0}
+    """Every action level 0 masks, and every action level 1 masks while it
+    leaves anything, kills the dragon when played (checked on a copy of the
+    board). Level 2 only narrows a queen's level-1 choices (its shield), and
+    lets it split only with no move left."""
+    stats = {"masked0": 0, "masked1": 0, "shielded": 0, "unmasked_fatal": 0, "turns": 0}
 
     def check(match, did, init, block):
         _, (mask0, mask1, mask2) = match.features(did)
+        assert mask0.any() and mask1.any() and mask2.any()
         if did > 1:
             assert (mask2 == mask1).all()
+        else:
+            assert (mask2 <= mask1).all()
+            assert not (mask2[12] and mask2[:12].any()), f"the queen may split only with no move left\n{block}"
         for action in range(bccore.NUM_ACTIONS):
             if not mask0[action]:
                 assert match.probe(action), f"level 0 masked a surviving action {action}\n{block}"
                 stats["masked0"] += 1
-            elif not mask1[action] and mask1.any():
+            elif not mask1[action]:
                 assert match.probe(action), f"level 1 masked a surviving action {action}\n{block}"
                 stats["masked1"] += 1
-            elif not mask2[action] and mask2.any():
-                if action == bccore.NUM_ACTIONS - 1:
-                    stats["queen_splits"] += 1
-                else:
-                    assert match.probe(action), f"level 2 masked a surviving move {action}\n{block}"
-                    stats["queen_trades"] += 1
+            elif not mask2[action]:
+                stats["shielded"] += 1
             elif match.probe(action):
                 stats["unmasked_fatal"] += 1
         stats["turns"] += 1
 
     for label, text, seed, styles in GAMES:
         play_stepwise(text, seed, styles, check)
-    assert stats["masked0"] > 100 and stats["masked1"] > 1000, stats
-    assert stats["queen_splits"] > 100 and stats["queen_trades"] > 0, stats
+    assert stats["masked0"] > 100 and stats["masked1"] > 1000 and stats["shielded"] > 100, stats
 
 
 def test_observation_codes_are_in_range():
@@ -283,8 +283,13 @@ def test_head_trades_and_the_queen():
     assert m.probe(left) and m.probe(forward)
     assert mask1[split] == 1 and mask1[right] == 1
     assert mask2[forward] == 0     # the queen trades with nobody
-    assert mask2[split] == 0       # and never splits
+    assert mask2[split] == 0       # and never splits while it has a move
     assert mask2[right] == 1
+    # Right then left ends at (9, 9), one step from dragon 3's head: safe for
+    # now, but the queen's shield keeps it out of that reach.
+    right_then_left = 3 + 3 * 1 + 2
+    assert mask1[right_then_left] == 1 and not m.probe(right_then_left)
+    assert mask2[right_then_left] == 0
     # The ally (2) faces south onto the queen's head: masked at level 1.
     _, (_, mask1, mask2) = m.features(2)
     assert mask1[forward] == 0 and (mask2 == mask1).all()
@@ -320,3 +325,35 @@ def test_enemy_reach():
     # The ally's own head, (8, 7), is two steps from dragon 3, via (9, 7).
     obs, _ = m.features(2)
     assert scalar(obs, head_now) == 1
+
+
+def test_the_queen_keeps_out_of_pockets():
+    # Facing east at (8, 8); the tile ahead is closed on its other three
+    # sides by kelp: a pocket of one tile, smaller than the dragon.
+    kelp = [("N", 9, 8), ("W", 10, 8), ("N", 9, 9)]
+    for queen in (True, False):
+        body = [(8, 8), (7, 8), (6, 8)]
+        dragons = [("A", body), ("B", [(12, 12), (13, 12)])] if queen else \
+            [("A", [(2, 2), (2, 3)]), ("B", [(12, 12), (13, 12)]), ("A", body)]
+        m = bccore.Match(make_map(16, 16, dragons, kelp=kelp), 0)
+        m.begin()
+        did = 0 if queen else 2
+        _, (_, mask1, mask2) = m.features(did)
+        assert mask1[0] == 1 and not m.probe(0)       # stepping in is not fatal yet
+        assert mask2[0] == (0 if queen else 1)        # but the queen's shield keeps it out
+        assert mask2[1] == 1 and mask2[2] == 1
+
+
+def test_a_cornered_dragon_dies_alone():
+    # The queen (0) at (8, 8) facing north, kelp ahead and on its right, an
+    # ally's head (2) on its left: every move is fatal, but it never takes
+    # the ally with it. (With nothing safe, level 2 falls back as level 1.)
+    m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (8, 9), (8, 10)]), ("B", [(12, 12), (13, 12)]),
+                                       ("A", [(7, 8), (6, 8), (5, 8)])], kelp=[("N", 8, 8), ("W", 9, 8)]), 0)
+    m.begin()
+    _, (mask0, mask1, mask2) = m.features(0)
+    assert all(m.probe(a) for a in range(12))
+    assert list(mask0[:12]) == [1] * 12
+    left_moves = [2, 9, 10, 11]                        # left, and two-step moves through it
+    assert [a for a in range(12) if not mask1[a]] == left_moves
+    assert (mask2 == mask1).all()

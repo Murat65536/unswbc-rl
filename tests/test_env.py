@@ -97,7 +97,7 @@ def test_every_decision_saw_its_turns_board():
     rng = np.random.default_rng(1)
     env = bccore.BatchEnv(1, 0, OPTIONS)
     env.set_next_level(0, 123)
-    records = run(env, 3000, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
+    records = run(env, 6000, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
     seeds = episode_seeds(records, 123, 50_000)
 
     by_episode = {}
@@ -149,7 +149,7 @@ def test_shaping_telescopes_and_results_arrive_discounted(gamma, scripted):
     n = 16
     env = bccore.BatchEnv(n, 3, options)
     rng = np.random.default_rng(3)
-    records = run(env, 1500, rng)
+    records = run(env, 2500, rng)
 
     rows = {}       # row -> (slot, episode, dragon, team, round, phi)
     reward = {}     # row -> reward of the transition it starts
@@ -283,7 +283,7 @@ def test_episodes_report_the_queens(mask_level):
     n = 16
     env = bccore.BatchEnv(n, 4, dict(OPTIONS, mask_level=mask_level))
     rng = np.random.default_rng(4)
-    records = run(env, 1500, rng, split_bias=0.3)
+    records = run(env, 2500, rng, split_bias=0.3)
     games, splits, deciders, last_resort, causes = 0, 0, set(), 0, set()
     for buf, actions, out in records:
         for slot in range(n):
@@ -318,19 +318,20 @@ def test_episodes_report_the_queens(mask_level):
 
 def test_the_careful_player_outlasts_the_random_one():
     """Half the scripted slots play the careful player, half the random-safe
-    one, against random allowed moves: the careful player's queen survives
-    far more often, and its games reach the round limit."""
+    one, against random allowed moves: the careful player wins far more
+    often, and its games last longer."""
     n = 16
     env = bccore.BatchEnv(n, 6, dict(OPTIONS, scripted_frac=1.0, scripted_careful=0.5))
     rng = np.random.default_rng(6)
     records = run(env, 2500, rng)
-    alive = {0: [], 1: []}
+    wins, rounds = {0: [], 1: []}, {0: [], 1: []}
     for buf, actions, out in records:
         e = out["episodes"]
         for i in range(len(e["slot"])):
             careful = int(e["scripted_careful"][i])
             assert careful == (e["slot"][i] < n // 2)
-            team = "ab"[e["scripted_team"][i]]
-            alive[careful].append(e[f"queen_died_{team}"][i] < 0)
-    assert len(alive[0]) > 20 and len(alive[1]) > 10
-    assert np.mean(alive[1]) > np.mean(alive[0]) + 0.2, {k: np.mean(v) for k, v in alive.items()}
+            wins[careful].append(e["outcome"][i] == e["scripted_team"][i])
+            rounds[careful].append(e["rounds"][i])
+    assert len(wins[0]) > 20 and len(wins[1]) > 10
+    assert np.mean(wins[1]) > np.mean(wins[0]) + 0.5, {k: np.mean(v) for k, v in wins.items()}
+    assert np.mean(rounds[1]) > np.mean(rounds[0])
