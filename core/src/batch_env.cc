@@ -135,7 +135,6 @@ BatchEnv::BatchEnv(int numGames, EnvConfig config, uint64_t seed)
     for (Slot& slot : mSlots)
     {
         slot.mNextSeed = mSeeds();
-        slot.mHasNext = false;
     }
 
     int threads = mConfig.mThreads > 0 ? mConfig.mThreads : static_cast<int>(std::thread::hardware_concurrency());
@@ -239,7 +238,6 @@ void BatchEnv::SetNextLevel(int slot, uint64_t levelSeed)
 {
     RUNTIME_ASSERT(slot >= 0 && slot < NumGames(), "no such slot");
     mSlots[slot].mNextSeed = levelSeed;
-    mSlots[slot].mHasNext = true;
 }
 
 int64_t BatchEnv::Turns() const
@@ -258,7 +256,6 @@ void BatchEnv::StartLevel(Slot& slot, int index)
     // Without a level set from outside, the next one is drawn from this
     // slot's own sequence, so slots never share a generator across threads.
     slot.mNextSeed = Mix(seed ^ (static_cast<uint64_t>(index) << 32) ^ static_cast<uint64_t>(slot.mEpisode));
-    slot.mHasNext = false;
 
     Level const level = MakeLevel(mConfig, seed);
     GameState state = level.mMapIndex >= 0 ? mMapStates[level.mMapIndex]

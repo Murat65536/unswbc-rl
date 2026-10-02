@@ -196,7 +196,6 @@ class BatchEnv
         std::unique_ptr<Game> mGame;
         uint64_t mLevelSeed = 0;
         int mMapIndex = -1;
-        bool mHasNext = false;
         uint64_t mNextSeed = 0;
         int32_t mEpisode = 0;
         int mDragons = 0;
