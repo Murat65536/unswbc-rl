@@ -88,6 +88,11 @@ python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0
     --kelp 0.0 0.25 --scripted-frac 0.35 --scripted-careful 0.6 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
+# models/rl_bot_v3.pt is the checkpoint bots/rl_bot_v3 was exported from (iteration
+# 700): actor, critic, optimizer, league and level replay. Continue it with the
+# same flags plus --resume models/rl_bot_v3.pt and a larger --iterations (keep
+# --games 1024: changing it across a resume is untested).
+
 # Compare checkpoints quickly, natively, against the careful scripted player:
 python -m rl.eval_env checkpoints/run1/ckpt_000500.pt checkpoints/run1/latest.pt --opponent careful
 
