@@ -480,6 +480,10 @@ class Trainer:
             if scripted:
                 out["scripted_win_rate"] = float(np.mean([e["outcome"] == 1 - e["scripted_team"] for e in scripted]))
                 out["scripted_games"] = len(scripted)
+                careful = [e for e in scripted if e["scripted_careful"]]
+                if careful:
+                    out["careful_win_rate"] = float(np.mean([e["outcome"] == 1 - e["scripted_team"] for e in careful]))
+                    out["careful_games"] = len(careful)
             out.update(queen_stats(episodes))
         if self.plr is not None:
             out["plr_levels"] = self.plr.size
@@ -561,6 +565,7 @@ def env_options(args) -> dict:
         "kelp": tuple(args.kelp),
         "portal_pairs": tuple(args.portal_pairs),
         "scripted_frac": args.scripted_frac,
+        "scripted_careful": args.scripted_careful,
     }
     if args.official_maps > 0:
         options["maps"] = official_maps()

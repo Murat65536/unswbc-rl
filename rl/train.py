@@ -69,6 +69,9 @@ def parse_args(argv=None):
     league.add_argument("--opponent-every", type=int, default=5)
     league.add_argument("--scripted-frac", type=float, default=0.0,
                         help="share of game slots (the last ones) where one team is a scripted random-safe player")
+    league.add_argument("--scripted-careful", type=float, default=0.0,
+                        help="share of those scripted slots that play the careful player instead (safe steps with "
+                             "room, pearls and distance from enemy heads; it survives to the round limit more)")
     league.add_argument("--plr-replay", type=float, default=0.5, help="chance a new level is a replayed one (0: off)")
     league.add_argument("--plr-capacity", type=int, default=4000)
     league.add_argument("--plr-temperature", type=float, default=0.3)
@@ -116,7 +119,7 @@ def main(argv=None):
     writer = None
     log_file = None
     columns = ["iteration", "decisions", "trained_rows", "episodes", "mean_rounds", "mean_total_length", "draw_rate",
-               "league_win_rate", "scripted_win_rate", "queen_alive", "queen_splits", "round_limit_rate",
+               "league_win_rate", "scripted_win_rate", "careful_win_rate", "queen_alive", "queen_splits", "round_limit_rate",
                "queen_decided_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
                "decisions_per_second", "env_seconds", "seconds", "carried", "plr_levels"]
     if args.log_csv:
@@ -137,6 +140,8 @@ def main(argv=None):
             line += f" | league win {stats['league_win_rate']:.2f} ({stats['league_games']})"
         if "scripted_win_rate" in stats:
             line += f" | vs scripted {stats['scripted_win_rate']:.2f} ({stats['scripted_games']})"
+        if "careful_win_rate" in stats:
+            line += f" careful {stats['careful_win_rate']:.2f} ({stats['careful_games']})"
         if "queen_alive" in stats:
             line += f" | queen alive {stats['queen_alive']:.2f} splits {stats['queen_splits']:.2f}"
         if "entropy" in stats:

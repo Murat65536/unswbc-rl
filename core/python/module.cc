@@ -516,6 +516,7 @@ core::EnvConfig ConfigFrom(nb::dict const& options)
         else if (name == "maps") c.mMaps = nb::cast<std::vector<std::string>>(value);
         else if (name == "map_prob") c.mMapProb = nb::cast<float>(value);
         else if (name == "scripted_frac") c.mScriptedFrac = nb::cast<float>(value);
+        else if (name == "scripted_careful") c.mScriptedCareful = nb::cast<float>(value);
         else throw nb::value_error(("unknown environment option: " + name).c_str());
     }
     return c;
@@ -598,7 +599,7 @@ class PyBatchEnv
         out["boot_priv"] = ToNumpy2(mEnv.BootPrivileged(), core::kPrivileged);
 
         std::vector<int32_t> slot, mapIndex, rounds, outcome, dragons, totalA, totalB, queenA, queenB, longestA, longestB,
-            queenDiedA, queenDiedB, queenSplitsA, queenSplitsB, decider, scripted;
+            queenDiedA, queenDiedB, queenSplitsA, queenSplitsB, decider, scripted, careful;
         std::vector<uint64_t> level;
         for (core::EpisodeInfo const& e : mEnv.Episodes())
         {
@@ -620,6 +621,7 @@ class PyBatchEnv
             queenSplitsB.push_back(e.mQueenSplits[1]);
             decider.push_back(e.mDecider);
             scripted.push_back(e.mScriptedTeam);
+            careful.push_back(e.mScriptedCareful);
         }
         nb::dict episodes;
         episodes["slot"] = ToNumpy(std::move(slot));
@@ -640,6 +642,7 @@ class PyBatchEnv
         episodes["queen_splits_b"] = ToNumpy(std::move(queenSplitsB));
         episodes["decider"] = ToNumpy(std::move(decider));
         episodes["scripted_team"] = ToNumpy(std::move(scripted));
+        episodes["scripted_careful"] = ToNumpy(std::move(careful));
         out["episodes"] = episodes;
         return out;
     }

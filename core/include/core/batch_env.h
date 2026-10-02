@@ -86,6 +86,10 @@ struct EnvConfig
     /// the learner plays team (slot + episode) % 2. Scripted turns are played
     /// inside the environment, so only the learner's decisions come out.
     float mScriptedFrac = 0.0f;
+    /// The share of those scripted slots (the first ones) that play the
+    /// careful player instead, which survives to the round limit far more
+    /// often (see CarefulAction), so the round-limit tiebreaks decide games.
+    float mScriptedCareful = 0.0f;
 };
 
 /// The level a seed names: the same map and match seed every time, in any
@@ -125,7 +129,17 @@ struct EpisodeInfo
     int32_t mDecider = -1;
     /// The scripted player's team (0 A, 1 B), or -1 in a self-play slot.
     int32_t mScriptedTeam = -1;
+    /// Whether the scripted player was the careful one.
+    int32_t mScriptedCareful = 0;
 };
+
+/// The careful scripted player's action for a View: a single step the level-2
+/// mask allows that is not onto a head (so it never trades heads, and never
+/// splits by choice), scored by the room past it (a pocket smaller than the
+/// dragon scores low), a pearl there, and how close enemy heads are (see
+/// EnemyReach), with three bits of `noise` per step breaking ties. With no
+/// such step, the first action the mask allows.
+int CarefulAction(View const& view, uint32_t noise);
 
 /// A transition that ended without a next decision: at the game's end
 /// (mBoot < 0, nothing to bootstrap) or cut at the horizon (mBoot indexes the
@@ -223,6 +237,7 @@ class BatchEnv
         View mView;
         int64_t mTurns = 0;
         int mScriptedTeam = -1;
+        bool mCareful = false;
         std::array<int32_t, 2> mQueenDied{-1, -1};
         std::array<int32_t, 2> mQueenSplits{};
         /// Each scripted dragon's own generator (a fresh process each, so
@@ -255,6 +270,7 @@ class BatchEnv
     EnvConfig mConfig;
     std::vector<Slot> mSlots;
     int mScriptedSlots = 0;
+    int mCarefulSlots = 0;
     std::vector<GameState> mMapStates;
     std::mt19937_64 mSeeds;
     int64_t mStep = 0;

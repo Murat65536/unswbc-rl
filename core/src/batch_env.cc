@@ -143,6 +143,8 @@ BatchEnv::BatchEnv(int numGames, EnvConfig config, uint64_t seed)
                    "the queen and longest weights must be non-negative and sum to at most 1");
     RUNTIME_ASSERT(mConfig.mMaskLevel >= 0 && mConfig.mMaskLevel < kMaskLevels, "no such mask level");
     mScriptedSlots = static_cast<int>(std::lround(mConfig.mScriptedFrac * numGames));
+    RUNTIME_ASSERT(mConfig.mScriptedCareful >= 0.0f && mConfig.mScriptedCareful <= 1.0f, "careful share out of range");
+    mCarefulSlots = static_cast<int>(std::lround(mConfig.mScriptedCareful * mScriptedSlots));
 
     int threads = mConfig.mThreads > 0 ? mConfig.mThreads : static_cast<int>(std::thread::hardware_concurrency());
     threads = std::clamp(threads, 1, numGames);
@@ -275,6 +277,7 @@ void BatchEnv::StartLevel(Slot& slot, int index)
     slot.mEpisode++;
     slot.mAgents.assign(slot.mDragons, Agent{});
     slot.mScriptedTeam = index >= NumGames() - mScriptedSlots ? 1 - (index + slot.mEpisode) % 2 : -1;
+    slot.mCareful = slot.mScriptedTeam >= 0 && index < NumGames() - mScriptedSlots + mCarefulSlots;
     slot.mScriptRng.clear();
     slot.mQueenDied = {-1, -1};
     slot.mQueenSplits = {0, 0};
@@ -294,6 +297,72 @@ void BatchEnv::NoteQueens(Slot& slot)
     }
 }
 
+namespace {
+
+ControllerReply ReplyFor(Command const& command)
+{
+    ControllerReply reply;
+    if (command.mSplit)
+    {
+        reply.mAction = ActionSplit{command.mSplitSize};
+        return reply;
+    }
+    ActionMove move;
+    for (int i = 0; i < command.mSteps; i++)
+    {
+        move.mSteps.push_back(static_cast<Direction>(kDirChars[command.mDirs[i]]));
+    }
+    reply.mAction = std::move(move);
+    return reply;
+}
+
+} // namespace
+
+int CarefulAction(View const& view, uint32_t noise)
+{
+    MoveSight const sight = LookAhead(view);
+    std::array<uint8_t, kNumActions> mask{};
+    Mask(view, sight, 2, mask.data());
+    std::array<uint8_t, kTiles> const reach = EnemyReach(view);
+    int best = -1;
+    int bestScore = 0;
+    for (int a = 0; a < kSingleSteps; a++)
+    {
+        if (!mask[a] || sight.mHead[a] != kNoHead)
+        {
+            continue;
+        }
+        int const target = sight.mTarget[a];
+        int score = 40; // out of sight: no better or worse than middling
+        if (target >= 0)
+        {
+            Region const region = Explore(view, target);
+            int const room = std::min(region.mTiles, 48);
+            score = region.mOpen ? 60 + room : room >= view.mLength ? 30 + room : room;
+            score += view.mTiles[target].mPearl ? 15 : 0;
+            score -= 25 * reach[target];
+        }
+        score = score * 8 + static_cast<int>((noise >> (3 * a)) & 7);
+        if (best < 0 || score > bestScore)
+        {
+            best = a;
+            bestScore = score;
+        }
+    }
+    if (best >= 0)
+    {
+        return best;
+    }
+    for (int a = 0; a < kNumActions; a++)
+    {
+        if (mask[a])
+        {
+            return a;
+        }
+    }
+    return 0;
+}
+
 void BatchEnv::PlayScripted(Slot& slot)
 {
     GameState const& state = slot.mGame->State();
@@ -308,6 +377,14 @@ void BatchEnv::PlayScripted(Slot& slot)
         rng = rng * 6364136223846793005ull + 1442695040888963407ull;
         return static_cast<int>((rng >> 33) % static_cast<uint64_t>(bound));
     };
+    if (slot.mCareful)
+    {
+        int const noise = next(1 << 9);
+        slot.mGame->TakeTurnWith(ReplyFor(Decode(slot.mView, CarefulAction(slot.mView, static_cast<uint32_t>(noise)))));
+        slot.mTurns++;
+        NoteQueens(slot);
+        return;
+    }
     std::array<int, 4> order = {kNorth, kEast, kSouth, kWest};
     for (int i = 3; i > 0; i--)
     {
@@ -496,6 +573,7 @@ void BatchEnv::FinishGame(Slot& slot, int index, bool truncated)
                                                                            : 4;
     }
     info.mScriptedTeam = slot.mScriptedTeam;
+    info.mScriptedCareful = slot.mCareful ? 1 : 0;
     slot.mEpisodes.push_back(info);
 
     StartLevel(slot, index);
@@ -511,22 +589,10 @@ void BatchEnv::Play(Slot& slot, int index, int action)
     else
     {
         Command const command = Decode(slot.mView, action);
-        if (command.mSplit)
+        reply = ReplyFor(command);
+        if (command.mSplit && IsQueen(slot.mView.mId))
         {
-            reply.mAction = ActionSplit{command.mSplitSize};
-            if (IsQueen(slot.mView.mId))
-            {
-                slot.mQueenSplits[slot.mView.mTeam]++;
-            }
-        }
-        else
-        {
-            ActionMove move;
-            for (int i = 0; i < command.mSteps; i++)
-            {
-                move.mSteps.push_back(static_cast<Direction>(kDirChars[command.mDirs[i]]));
-            }
-            reply.mAction = std::move(move);
+            slot.mQueenSplits[slot.mView.mTeam]++;
         }
     }
     slot.mGame->TakeTurnWith(reply);

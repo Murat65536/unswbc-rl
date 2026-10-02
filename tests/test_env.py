@@ -312,3 +312,23 @@ def test_episodes_report_the_queens(mask_level):
                 assert e["outcome"][i] in (0, 1)
     assert games >= 20 and 0 in deciders
     assert splits > 0 if mask_level == 1 else splits <= last_resort
+
+
+def test_the_careful_player_outlasts_the_random_one():
+    """Half the scripted slots play the careful player, half the random-safe
+    one, against random allowed moves: the careful player's queen survives
+    far more often, and its games reach the round limit."""
+    n = 16
+    env = bccore.BatchEnv(n, 6, dict(OPTIONS, scripted_frac=1.0, scripted_careful=0.5))
+    rng = np.random.default_rng(6)
+    records = run(env, 2500, rng)
+    alive = {0: [], 1: []}
+    for buf, actions, out in records:
+        e = out["episodes"]
+        for i in range(len(e["slot"])):
+            careful = int(e["scripted_careful"][i])
+            assert careful == (e["slot"][i] < n // 2)
+            team = "ab"[e["scripted_team"][i]]
+            alive[careful].append(e[f"queen_died_{team}"][i] < 0)
+    assert len(alive[0]) > 20 and len(alive[1]) > 10
+    assert np.mean(alive[1]) > np.mean(alive[0]) + 0.2, {k: np.mean(v) for k, v in alive.items()}
