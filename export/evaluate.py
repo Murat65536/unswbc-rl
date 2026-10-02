@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import pathlib
 import random
-import subprocess
 import tempfile
 import time
 from collections import Counter
@@ -45,8 +44,11 @@ class GameRecord:
 
 def random_starter(folder: pathlib.Path) -> pathlib.Path:
     """The toolkit's C++ starter bot (`unswbc init cpp`): random safe steps."""
+    from unswbc.init import create
+
     bot = folder / "starter"
-    subprocess.run(["unswbc", "init", "cpp", str(bot)], check=True, capture_output=True)
+    if create("cpp", str(bot), True) != 0:
+        raise SystemExit("unswbc init cpp failed")
     return bot
 
 

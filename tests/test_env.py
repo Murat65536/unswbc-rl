@@ -232,3 +232,14 @@ def test_threads_do_not_change_the_games():
         return [(b["obs"].tobytes(), b["prev_reward"].tobytes(), o["done_row"].tobytes()) for b, a, o in records]
 
     assert play(1) == play(4)
+
+
+def test_outputs_must_be_the_callers_own_arrays():
+    env = bccore.BatchEnv(4, 0, OPTIONS)
+    buf = Buffers(4)
+    with pytest.raises(TypeError):
+        env.reset(buf.obs.astype(np.int16), buf.mask, buf.priv, buf.prev_row, buf.prev_reward, buf.info)
+    with pytest.raises(TypeError):
+        env.reset(np.asfortranarray(buf.obs), buf.mask, buf.priv, buf.prev_row, buf.prev_reward, buf.info)
+    env.reset(*buf.args())
+    assert buf.obs.any()

@@ -730,9 +730,15 @@ NB_MODULE(bccore, m)
         .def_prop_ro("turns", [](PyBatchEnv& self) { return self.Env().Turns(); })
         .def("set_next_level", [](PyBatchEnv& self, int slot, uint64_t seed) { self.Env().SetNextLevel(slot, seed); },
              "slot"_a, "level_seed"_a)
-        .def("reset", &PyBatchEnv::Reset, "obs"_a, "mask"_a, "priv"_a, "prev_row"_a, "prev_reward"_a, "info"_a)
-        .def("step", &PyBatchEnv::Step, "actions"_a, "obs"_a, "mask"_a, "priv"_a, "prev_row"_a, "prev_reward"_a,
-             "info"_a);
+        // The outputs are written in place, so they must be the caller's own
+        // arrays: noconvert() refuses a wrong dtype or layout instead of
+        // silently writing into a temporary copy.
+        .def("reset", &PyBatchEnv::Reset, nb::arg("obs").noconvert(), nb::arg("mask").noconvert(),
+             nb::arg("priv").noconvert(), nb::arg("prev_row").noconvert(), nb::arg("prev_reward").noconvert(),
+             nb::arg("info").noconvert())
+        .def("step", &PyBatchEnv::Step, "actions"_a, nb::arg("obs").noconvert(), nb::arg("mask").noconvert(),
+             nb::arg("priv").noconvert(), nb::arg("prev_row").noconvert(), nb::arg("prev_reward").noconvert(),
+             nb::arg("info").noconvert());
 
     nb::class_<Match>(m, "Match")
         .def(nb::init<std::string const&, uint64_t, bool>(), "map_text"_a, "seed"_a = 0, "record"_a = false)
