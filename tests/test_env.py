@@ -284,7 +284,7 @@ def test_episodes_report_the_queens(mask_level):
     env = bccore.BatchEnv(n, 4, dict(OPTIONS, mask_level=mask_level))
     rng = np.random.default_rng(4)
     records = run(env, 1500, rng, split_bias=0.3)
-    games, splits, deciders, last_resort = 0, 0, set(), 0
+    games, splits, deciders, last_resort, causes = 0, 0, set(), 0, set()
     for buf, actions, out in records:
         for slot in range(n):
             if buf["info"][slot][0] <= 1 and buf["mask"][slot][12] and mask_level == 2:
@@ -297,7 +297,8 @@ def test_episodes_report_the_queens(mask_level):
             games += 1
             for t in "ab":
                 died, length = e[f"queen_died_{t}"][i], e[f"queen_{t}"][i]
-                assert (died >= 0) == (length == 0)
+                assert (died >= 0) == (length == 0) == (e[f"queen_death_{t}"][i] > 0)
+                causes.add(int(e[f"queen_death_{t}"][i]))
                 assert -1 <= died <= e["rounds"][i]
                 splits += e[f"queen_splits_{t}"][i]
             decider = e["decider"][i]
@@ -311,6 +312,7 @@ def test_episodes_report_the_queens(mask_level):
             if decider in (1, 2, 3):
                 assert e["outcome"][i] in (0, 1)
     assert games >= 20 and 0 in deciders
+    assert {1, 2, 3} <= causes  # cornered, another own move, rammed by an enemy
     assert splits > 0 if mask_level == 1 else splits <= last_resort
 
 

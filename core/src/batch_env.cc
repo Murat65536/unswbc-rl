@@ -280,12 +280,41 @@ void BatchEnv::StartLevel(Slot& slot, int index)
     slot.mCareful = slot.mScriptedTeam >= 0 && index < NumGames() - mScriptedSlots + mCarefulSlots;
     slot.mScriptRng.clear();
     slot.mQueenDied = {-1, -1};
+    slot.mQueenDeath = {0, 0};
     slot.mQueenSplits = {0, 0};
 }
 
-void BatchEnv::NoteQueens(Slot& slot)
+namespace {
+
+/// No move the dragon can see survives (each is visibly fatal or onto a
+/// head), and it cannot split.
+bool Cornered(View const& view)
+{
+    if (SplitLegal(view))
+    {
+        return false;
+    }
+    MoveSight const sight = LookAhead(view);
+    for (int a = 0; a < kSplitAction; a++)
+    {
+        if (!sight.mVisiblyFatal[a] && sight.mHead[a] == kNoHead)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+void BatchEnv::TakeTurn(Slot& slot, ControllerReply const& reply)
 {
     GameState const& state = slot.mGame->State();
+    DragonId const mover = *slot.mGame->CurrentDragon();
+    Team const moverTeam = state.mDragons[mover].mTeam;
+    bool const cornered = IsQueen(mover) && Cornered(slot.mView);
+    slot.mGame->TakeTurnWith(reply);
+    slot.mTurns++;
     for (DragonId id = 0; id < 2 && id < static_cast<int>(state.mDragons.size()); id++)
     {
         Dragon const& queen = state.mDragons[id];
@@ -293,6 +322,7 @@ void BatchEnv::NoteQueens(Slot& slot)
         if (!queen.mAlive && slot.mQueenDied[team] < 0)
         {
             slot.mQueenDied[team] = state.mRound;
+            slot.mQueenDeath[team] = id == mover ? (cornered ? 1 : 2) : moverTeam == queen.mTeam ? 4 : 3;
         }
     }
 }
@@ -335,9 +365,7 @@ void BatchEnv::PlayScripted(Slot& slot)
     if (slot.mCareful)
     {
         int const action = CarefulAction(slot.mView, CarefulNoise(slot.mScriptRng[id]));
-        slot.mGame->TakeTurnWith(ReplyFor(Decode(slot.mView, action)));
-        slot.mTurns++;
-        NoteQueens(slot);
+        TakeTurn(slot, ReplyFor(Decode(slot.mView, action)));
         return;
     }
     std::array<int, 4> order = {kNorth, kEast, kSouth, kWest};
@@ -361,9 +389,7 @@ void BatchEnv::PlayScripted(Slot& slot)
     }
     ControllerReply reply;
     reply.mAction = ActionMove{{static_cast<Direction>(kDirChars[choice])}};
-    slot.mGame->TakeTurnWith(reply);
-    slot.mTurns++;
-    NoteQueens(slot);
+    TakeTurn(slot, reply);
 }
 
 void BatchEnv::Advance(Slot& slot, int index)
@@ -516,6 +542,7 @@ void BatchEnv::FinishGame(Slot& slot, int index, bool truncated)
     info.mQueen = {s.mQueen[0], s.mQueen[1]};
     info.mLongest = {s.mLongest[0], s.mLongest[1]};
     info.mQueenDied = slot.mQueenDied;
+    info.mQueenDeath = slot.mQueenDeath;
     info.mQueenSplits = slot.mQueenSplits;
     if (!truncated)
     {
@@ -550,9 +577,7 @@ void BatchEnv::Play(Slot& slot, int index, int action)
             slot.mQueenSplits[slot.mView.mTeam]++;
         }
     }
-    slot.mGame->TakeTurnWith(reply);
-    slot.mTurns++;
-    NoteQueens(slot);
+    TakeTurn(slot, reply);
     // Start the next game here as soon as this one ends (or is cut).
     Advance(slot, index);
 }

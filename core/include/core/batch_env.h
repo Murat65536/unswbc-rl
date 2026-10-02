@@ -122,6 +122,10 @@ struct EpisodeInfo
     std::array<int32_t, 2> mLongest{};
     /// The round each team's queen died in, or -1 if it lived.
     std::array<int32_t, 2> mQueenDied{-1, -1};
+    /// How it died: 0 it lived; on its own move, 1 cornered (no move it
+    /// could see survives, and no split) or 2 not; or 3 rammed by an enemy's
+    /// head, 4 by an ally's.
+    std::array<int32_t, 2> mQueenDeath{};
     /// How often each team's queen split.
     std::array<int32_t, 2> mQueenSplits{};
     /// What decided the game: 0 an elimination, then the first round-limit
@@ -232,6 +236,7 @@ class BatchEnv
         int mScriptedTeam = -1;
         bool mCareful = false;
         std::array<int32_t, 2> mQueenDied{-1, -1};
+        std::array<int32_t, 2> mQueenDeath{};
         std::array<int32_t, 2> mQueenSplits{};
         /// Each scripted dragon's own generator (a fresh process each, so
         /// they all start from the same state, as the starter's do).
@@ -255,8 +260,9 @@ class BatchEnv
     /// decision is outstanding in the slot.
     void Advance(Slot& slot, int index);
     void PlayScripted(Slot& slot);
-    /// Notes the round a queen died in, after a turn.
-    void NoteQueens(Slot& slot);
+    /// Plays the current dragon's turn (slot.mView is its view), noting
+    /// when and how a queen died in it.
+    void TakeTurn(Slot& slot, ControllerReply const& reply);
     void RunParallel(std::function<void(int, int)> const& work);
     void Gather();
 

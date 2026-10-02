@@ -600,7 +600,7 @@ class PyBatchEnv
         out["boot_priv"] = ToNumpy2(mEnv.BootPrivileged(), core::kPrivileged);
 
         std::vector<int32_t> slot, mapIndex, rounds, outcome, dragons, totalA, totalB, queenA, queenB, longestA, longestB,
-            queenDiedA, queenDiedB, queenSplitsA, queenSplitsB, decider, scripted, careful;
+            queenDiedA, queenDiedB, queenDeathA, queenDeathB, queenSplitsA, queenSplitsB, decider, scripted, careful;
         std::vector<uint64_t> level;
         for (core::EpisodeInfo const& e : mEnv.Episodes())
         {
@@ -618,6 +618,8 @@ class PyBatchEnv
             longestB.push_back(e.mLongest[1]);
             queenDiedA.push_back(e.mQueenDied[0]);
             queenDiedB.push_back(e.mQueenDied[1]);
+            queenDeathA.push_back(e.mQueenDeath[0]);
+            queenDeathB.push_back(e.mQueenDeath[1]);
             queenSplitsA.push_back(e.mQueenSplits[0]);
             queenSplitsB.push_back(e.mQueenSplits[1]);
             decider.push_back(e.mDecider);
@@ -639,6 +641,8 @@ class PyBatchEnv
         episodes["longest_b"] = ToNumpy(std::move(longestB));
         episodes["queen_died_a"] = ToNumpy(std::move(queenDiedA));
         episodes["queen_died_b"] = ToNumpy(std::move(queenDiedB));
+        episodes["queen_death_a"] = ToNumpy(std::move(queenDeathA));
+        episodes["queen_death_b"] = ToNumpy(std::move(queenDeathB));
         episodes["queen_splits_a"] = ToNumpy(std::move(queenSplitsA));
         episodes["queen_splits_b"] = ToNumpy(std::move(queenSplitsB));
         episodes["decider"] = ToNumpy(std::move(decider));

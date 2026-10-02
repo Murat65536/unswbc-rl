@@ -543,6 +543,10 @@ def queen_stats(episodes: list[dict]) -> dict:
         "queen_alive": float(np.mean([e[f"queen_died_{t}"] < 0 for e, t in sides])),
         "queen_splits": float(np.mean([e[f"queen_splits_{t}"] for e, t in sides])),
     }
+    # How the learner's queens died, per game: cornered, another own move,
+    # rammed by an enemy, by an ally (see EpisodeInfo::mQueenDeath).
+    for code, name in ((1, "cornered"), (2, "own_move"), (3, "rammed"), (4, "rammed_by_ally")):
+        out[f"queen_death_{name}"] = float(np.mean([e[f"queen_death_{t}"] == code for e, t in sides]))
     limit = [e for e in done if e["decider"] > 0]
     if limit:
         out["round_limit_rate"] = len(limit) / len(done)

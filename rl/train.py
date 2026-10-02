@@ -119,7 +119,8 @@ def main(argv=None):
     writer = None
     log_file = None
     columns = ["iteration", "decisions", "trained_rows", "episodes", "mean_rounds", "mean_total_length", "draw_rate",
-               "league_win_rate", "scripted_win_rate", "careful_win_rate", "queen_alive", "queen_splits", "round_limit_rate",
+               "league_win_rate", "scripted_win_rate", "careful_win_rate", "queen_alive", "queen_splits", "queen_death_cornered", "queen_death_own_move",
+               "queen_death_rammed", "queen_death_rammed_by_ally", "round_limit_rate",
                "queen_decided_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
                "decisions_per_second", "env_seconds", "seconds", "carried", "plr_levels"]
     if args.log_csv:
