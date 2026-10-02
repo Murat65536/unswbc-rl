@@ -77,6 +77,13 @@ struct EnvConfig
     /// Fixed maps (e.g. the official ones) mixed in with this probability.
     std::vector<std::string> mMaps;
     float mMapProb = 0.0f;
+
+    /// The last share of the slots play one team with a scripted random-safe
+    /// player (a random step that is not into kelp or onto a dragon it can
+    /// see, like the toolkit's starter bot), alternating teams by episode:
+    /// the learner plays team (slot + episode) % 2. Scripted turns are played
+    /// inside the environment, so only the learner's decisions come out.
+    float mScriptedFrac = 0.0f;
 };
 
 /// The level a seed names: the same map and match seed every time, in any
@@ -105,6 +112,8 @@ struct EpisodeInfo
     int32_t mDragons = 0;
     std::array<int32_t, 2> mTotal{};
     std::array<int32_t, 2> mQueen{};
+    /// The scripted player's team (0 A, 1 B), or -1 in a self-play slot.
+    int32_t mScriptedTeam = -1;
 };
 
 /// A transition that ended without a next decision: at the game's end
@@ -202,6 +211,10 @@ class BatchEnv
         std::vector<Agent> mAgents;
         View mView;
         int64_t mTurns = 0;
+        int mScriptedTeam = -1;
+        /// Each scripted dragon's own generator (a fresh process each, so
+        /// they all start from the same state, as the starter's do).
+        std::vector<uint64_t> mScriptRng;
 
         // Filled by a worker during a step, gathered afterwards.
         std::vector<Completion> mDone;
@@ -217,11 +230,16 @@ class BatchEnv
     float Phi(GameState const& state, Team team) const;
     float Phi(Standings const& standings) const;
     void Play(Slot& slot, int index, int action);
+    /// Plays scripted turns and ends (and restarts) games until a learner
+    /// decision is outstanding in the slot.
+    void Advance(Slot& slot, int index);
+    void PlayScripted(Slot& slot);
     void RunParallel(std::function<void(int, int)> const& work);
     void Gather();
 
     EnvConfig mConfig;
     std::vector<Slot> mSlots;
+    int mScriptedSlots = 0;
     std::vector<GameState> mMapStates;
     std::mt19937_64 mSeeds;
     int64_t mStep = 0;

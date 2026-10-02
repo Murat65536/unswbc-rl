@@ -63,6 +63,8 @@ def parse_args(argv=None):
     league.add_argument("--league-size", type=int, default=10)
     league.add_argument("--snapshot-every", type=int, default=25)
     league.add_argument("--opponent-every", type=int, default=5)
+    league.add_argument("--scripted-frac", type=float, default=0.0,
+                        help="share of game slots (the last ones) where one team is a scripted random-safe player")
     league.add_argument("--plr-replay", type=float, default=0.5, help="chance a new level is a replayed one (0: off)")
     league.add_argument("--plr-capacity", type=int, default=4000)
     league.add_argument("--plr-temperature", type=float, default=0.3)
@@ -102,7 +104,7 @@ def main(argv=None):
     writer = None
     log_file = None
     columns = ["iteration", "decisions", "trained_rows", "episodes", "mean_rounds", "mean_total_length", "draw_rate",
-               "league_win_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+               "league_win_rate", "scripted_win_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
                "decisions_per_second", "env_seconds", "seconds", "carried", "plr_levels"]
     if args.log_csv:
         new = not os.path.exists(args.log_csv)
@@ -120,6 +122,8 @@ def main(argv=None):
                 f"len {stats.get('mean_total_length', 0):5.1f}")
         if "league_win_rate" in stats:
             line += f" | league win {stats['league_win_rate']:.2f} ({stats['league_games']})"
+        if "scripted_win_rate" in stats:
+            line += f" | vs scripted {stats['scripted_win_rate']:.2f} ({stats['scripted_games']})"
         if "entropy" in stats:
             line += f" | H {stats['entropy']:.3f} kl {stats['approx_kl']:.4f} vL {stats['value_loss']:.4f}"
         print(line, flush=True)

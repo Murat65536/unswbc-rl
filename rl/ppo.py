@@ -127,6 +127,8 @@ class Trainer:
             self.level_ring[slot, 1] = self.slot_level[slot]
             self.env.set_next_level(slot, int(self.slot_level[slot]))
         self.league_slots = int(round(n * args.league_frac))
+        if self.league_slots + int(round(n * args.scripted_frac)) > n:
+            raise ValueError("--league-frac and --scripted-frac together exceed the slots")
         self.snapshots: list[dict] = []
         self.opponent = None
 
@@ -474,6 +476,10 @@ class Trainer:
             if league:
                 out["league_win_rate"] = float(np.mean([e["outcome"] == e["learner_team"] for e in league]))
                 out["league_games"] = len(league)
+            scripted = [e for e in episodes if e["scripted_team"] >= 0 and e["outcome"] in (0, 1, 2)]
+            if scripted:
+                out["scripted_win_rate"] = float(np.mean([e["outcome"] == 1 - e["scripted_team"] for e in scripted]))
+                out["scripted_games"] = len(scripted)
         if self.plr is not None:
             out["plr_levels"] = self.plr.size
         return out
@@ -522,6 +528,7 @@ def env_options(args) -> dict:
         "dragons_per_team": tuple(args.dragons_per_team),
         "kelp": tuple(args.kelp),
         "portal_pairs": tuple(args.portal_pairs),
+        "scripted_frac": args.scripted_frac,
     }
     if args.official_maps > 0:
         options["maps"] = official_maps()

@@ -135,12 +135,12 @@ def phi(priv, shaping=0.5, queen_weight=0.5):
     return shaping * (queen_weight * (qa - qb) / (qa + qb + 2) + (1 - queen_weight) * (ta - tb) / (ta + tb + 2))
 
 
-@pytest.mark.parametrize("gamma", [1.0, 0.95])
-def test_shaping_telescopes_and_results_arrive_discounted(gamma):
+@pytest.mark.parametrize("gamma,scripted", [(1.0, 0.0), (0.95, 0.0), (0.95, 0.5)])
+def test_shaping_telescopes_and_results_arrive_discounted(gamma, scripted):
     """Over each dragon's whole trajectory, sum_i gamma^i r_i equals
     gamma^K * result - phi(first decision), K the rounds from its first
     decision to the end: the shaping only ever subtracts the start."""
-    options = dict(OPTIONS, gamma=gamma, shaping=0.5, queen_weight=0.5)
+    options = dict(OPTIONS, gamma=gamma, shaping=0.5, queen_weight=0.5, scripted_frac=scripted)
     n = 16
     env = bccore.BatchEnv(n, 3, options)
     rng = np.random.default_rng(3)
@@ -243,3 +243,28 @@ def test_outputs_must_be_the_callers_own_arrays():
         env.reset(np.asfortranarray(buf.obs), buf.mask, buf.priv, buf.prev_row, buf.prev_reward, buf.info)
     env.reset(*buf.args())
     assert buf.obs.any()
+
+
+def test_scripted_slots_only_ask_the_learner():
+    """In the scripted share of the slots, one team is played inside the
+    environment by the random-safe player; only the other team's decisions
+    come out, and the team the learner plays alternates by episode."""
+    n = 8
+    env = bccore.BatchEnv(n, 5, dict(OPTIONS, scripted_frac=0.5))
+    rng = np.random.default_rng(2)
+    records = run(env, 600, rng)
+    scripted_slots = range(n // 2, n)
+    episodes_seen = set()
+    for buf, actions, out in records:
+        for slot in scripted_slots:
+            did, team, round_num, episode = (int(v) for v in buf["info"][slot])
+            assert team == (slot + episode) % 2
+            episodes_seen.add((slot, episode))
+        e = out["episodes"]
+        for i in range(len(e["slot"])):
+            slot = int(e["slot"][i])
+            if slot in scripted_slots:
+                assert e["scripted_team"][i] in (0, 1)
+            else:
+                assert e["scripted_team"][i] == -1
+    assert len({episode % 2 for slot, episode in episodes_seen}) == 2

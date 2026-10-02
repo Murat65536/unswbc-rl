@@ -3,6 +3,7 @@
 #include "engine/helpers.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace core {
@@ -136,6 +137,8 @@ BatchEnv::BatchEnv(int numGames, EnvConfig config, uint64_t seed)
     {
         slot.mNextSeed = mSeeds();
     }
+    RUNTIME_ASSERT(mConfig.mScriptedFrac >= 0.0f && mConfig.mScriptedFrac <= 1.0f, "scripted share out of range");
+    mScriptedSlots = static_cast<int>(std::lround(mConfig.mScriptedFrac * numGames));
 
     int threads = mConfig.mThreads > 0 ? mConfig.mThreads : static_cast<int>(std::thread::hardware_concurrency());
     threads = std::clamp(threads, 1, numGames);
@@ -267,6 +270,75 @@ void BatchEnv::StartLevel(Slot& slot, int index)
     slot.mMapIndex = level.mMapIndex;
     slot.mEpisode++;
     slot.mAgents.assign(slot.mDragons, Agent{});
+    slot.mScriptedTeam = index >= NumGames() - mScriptedSlots ? 1 - (index + slot.mEpisode) % 2 : -1;
+    slot.mScriptRng.clear();
+}
+
+void BatchEnv::PlayScripted(Slot& slot)
+{
+    GameState const& state = slot.mGame->State();
+    DragonId const id = *slot.mGame->CurrentDragon();
+    ViewFromState(state, state.mDragons[id], slot.mView);
+    if (id >= static_cast<int>(slot.mScriptRng.size()))
+    {
+        slot.mScriptRng.resize(id + 1, 0x853C49E6748FEA9Bull);
+    }
+    uint64_t& rng = slot.mScriptRng[id];
+    auto const next = [&rng](int bound) {
+        rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<int>((rng >> 33) % static_cast<uint64_t>(bound));
+    };
+    std::array<int, 4> order = {kNorth, kEast, kSouth, kWest};
+    for (int i = 3; i > 0; i--)
+    {
+        std::swap(order[i], order[next(i + 1)]);
+    }
+    // The starter's rule: the first direction, in random order, that is not
+    // into kelp and not onto a visible dragon on the plain neighbouring tile.
+    int choice = kNorth;
+    for (int const dir : order)
+    {
+        TileView const& here = slot.mView.mTiles[kHeadTile];
+        int const ahead = NeighbourInWindow(kHeadTile, dir);
+        if (here.mEdges[dir].mKind == kKelp || (ahead >= 0 && slot.mView.mTiles[ahead].mPart.mId >= 0))
+        {
+            continue;
+        }
+        choice = dir;
+        break;
+    }
+    ControllerReply reply;
+    reply.mAction = ActionMove{{static_cast<Direction>(kDirChars[choice])}};
+    slot.mGame->TakeTurnWith(reply);
+    slot.mTurns++;
+}
+
+void BatchEnv::Advance(Slot& slot, int index)
+{
+    for (;;)
+    {
+        if (slot.mGame->Over())
+        {
+            FinishGame(slot, index, false);
+            continue;
+        }
+        if (slot.mGame->State().mRound >= mConfig.mMaxRounds)
+        {
+            FinishGame(slot, index, true);
+            continue;
+        }
+        if (slot.mScriptedTeam >= 0)
+        {
+            DragonId const id = *slot.mGame->CurrentDragon();
+            Team const team = slot.mGame->State().mDragons[id].mTeam;
+            if ((team == Team::A ? 0 : 1) == slot.mScriptedTeam)
+            {
+                PlayScripted(slot);
+                continue;
+            }
+        }
+        return;
+    }
 }
 
 float BatchEnv::Phi(GameState const& state, Team team) const
@@ -385,6 +457,7 @@ void BatchEnv::FinishGame(Slot& slot, int index, bool truncated)
     Standings const s = StandingsFor(state, Team::A);
     info.mTotal = {s.mTotal[0], s.mTotal[1]};
     info.mQueen = {s.mQueen[0], s.mQueen[1]};
+    info.mScriptedTeam = slot.mScriptedTeam;
     slot.mEpisodes.push_back(info);
 
     StartLevel(slot, index);
@@ -416,23 +489,8 @@ void BatchEnv::Play(Slot& slot, int index, int action)
     }
     slot.mGame->TakeTurnWith(reply);
     slot.mTurns++;
-
     // Start the next game here as soon as this one ends (or is cut).
-    for (;;)
-    {
-        if (slot.mGame->Over())
-        {
-            FinishGame(slot, index, false);
-        }
-        else if (slot.mGame->State().mRound >= mConfig.mMaxRounds)
-        {
-            FinishGame(slot, index, true);
-        }
-        else
-        {
-            return;
-        }
-    }
+    Advance(slot, index);
 }
 
 void BatchEnv::Gather()
@@ -478,6 +536,7 @@ void BatchEnv::Reset(DecisionOut const& out)
             slot.mBootPrivileged.clear();
             slot.mEpisodes.clear();
             StartLevel(slot, i);
+            Advance(slot, i);
             Decide(slot, i, out);
         }
     };
