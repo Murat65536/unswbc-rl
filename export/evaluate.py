@@ -155,14 +155,15 @@ def main():
     p.add_argument("--max-games", type=int, default=2000)
     args = p.parse_args()
 
-    from unswbc import clangtool
     from unswbc.engine import EngineModule
+
+    from .gate import build_wasm
 
     with tempfile.TemporaryDirectory() as tmp:
         opponent = pathlib.Path(args.opponent) if args.opponent else random_starter(pathlib.Path(tmp))
         name = "random starter" if args.opponent is None else opponent.name
-        wasm_bot = clangtool.build(pathlib.Path(args.bot))
-        wasm_opponent = clangtool.build(opponent)
+        wasm_bot = build_wasm(pathlib.Path(args.bot))
+        wasm_opponent = build_wasm(opponent)
         engine = EngineModule()
         points = {"bot": [], "opponent": []}
         records = []

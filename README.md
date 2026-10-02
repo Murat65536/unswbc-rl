@@ -48,8 +48,16 @@ version of the same network.
   metered sandbox: same observation, same action. A turn costs about 4M of
   the 100M points (2.5M of that is the single write), 0.6 MB of memory, and
   the zip is about 420 KB.
-- **Strength.** See the pull request for the latest run against the random
-  starter (`python -m export.evaluate`).
+- **Strength.** `bots/rl_bot_v2` (about 35M training decisions, roughly an
+  hour of iteration time on this 4-core CPU: 360 iterations of self-play
+  with the league and level replay, then 180 more with a quarter of the
+  games against the scripted random-safe player) beats the toolkit's
+  random starter in 106 of 108 games on the 15 official maps and 12
+  generated ones, both sides, two seeds, with no bot errors. Both losses
+  are trauma as team A, a round-limit tiebreak: the bot splits into many
+  short dragons and loses its queen in the maze, and the starter's single
+  dragon ends up the longest. `bots/rl_bot_v1` is the earlier NumPy bot,
+  kept as a baseline.
 
 ## Setup
 
@@ -172,6 +180,11 @@ plays it against the random starter (or any bot) in the sandbox, and with
 
 - **Sonar is unused.** The View carries messages and echoes, but the
   observation and actions do not use them yet.
+- **Queen and longest dragon.** The bot still under-values the round-limit
+  tiebreak order (queen, then longest, then total): it splits freely and
+  risks its queen. Shaping on the longest dragon rather than the total,
+  or longer training against opponents that survive to the limit, are
+  the obvious next steps.
 - **The policy is an MLP.** A small convolutional or attention trunk over
   the window would likely learn faster; the points budget leaves room for
   a much bigger network (a turn uses about 4% of it).

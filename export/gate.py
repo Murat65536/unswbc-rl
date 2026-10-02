@@ -175,14 +175,35 @@ def native_check(bot_dir: pathlib.Path, sequences: list[Sequence], report: GateR
                     report.native_reply_mismatch += 1
 
 
+def build_wasm(bot_dir: pathlib.Path) -> pathlib.Path:
+    """The bot built by the judge's clang, with the judge's flags.
+
+    unswbc caches these builds by folder name and the .c/.cpp sources only,
+    so after a change to a header (weights.h, the shared core) it would hand
+    back the old build. This builds a copy named after a hash of every file
+    in the bot instead."""
+    import hashlib
+    import shutil
+
+    from unswbc import clangtool
+
+    bot_dir = pathlib.Path(bot_dir)
+    digest = hashlib.sha256()
+    for path in sorted(p for p in bot_dir.rglob("*") if p.is_file() and ".unswbc-build" not in p.parts):
+        digest.update(path.relative_to(bot_dir).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
+    copy = pathlib.Path(tempfile.gettempdir()) / "unswbc-rl-builds" / f"{bot_dir.resolve().name}-{digest.hexdigest()[:16]}"
+    if not copy.is_dir():
+        shutil.copytree(bot_dir, copy, ignore=shutil.ignore_patterns(".unswbc-build"))
+    return clangtool.build(copy)
+
+
 def sandbox_check(bot_dir: pathlib.Path, sequences: list[Sequence], report: GateReport, max_turns: int):
     try:
-        from unswbc import clangtool
         from unswbc.sandbox import SandboxBot, WasmPool
     except ImportError:
         report.notes.append("the unswbc toolkit is not installed: sandbox check skipped")
         return
-    wasm = clangtool.build(bot_dir)
+    wasm = build_wasm(bot_dir)
     pool = WasmPool([str(wasm)], cwd=str(bot_dir), key="gate")
     try:
         for seq in sequences:
