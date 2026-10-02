@@ -25,6 +25,10 @@ from export.quantize import quantize  # noqa: E402
 from rl.policy import Actor  # noqa: E402
 
 
+# The level training uses by default: the queen's rules are in the bot too.
+MASK_LEVEL = 2
+
+
 @pytest.fixture(scope="module")
 def exported(tmp_path_factory):
     if shutil.which("c++") is None:
@@ -35,13 +39,13 @@ def exported(tmp_path_factory):
     actor.eval()
     integer = quantize(actor)
     out = tmp_path_factory.mktemp("bot")
-    write_bot(integer, 1, out, "test")
+    write_bot(integer, MASK_LEVEL, out, "test")
     return out, actor, integer
 
 
 def test_bot_matches_training_turn_for_turn_natively(exported):
     out, actor, integer = exported
-    report = run_gate(out, actor, integer, games=6, sandbox=False)
+    report = run_gate(out, actor, integer, mask_level=MASK_LEVEL, games=6, sandbox=False)
     print(report.summary())
     assert report.passed
     assert report.native_turns > 500 and report.native_obs_mismatch == 0 and report.native_reply_mismatch == 0
@@ -51,6 +55,6 @@ def test_bot_matches_training_turn_for_turn_natively(exported):
 def test_bot_matches_in_the_judges_sandbox(exported):
     pytest.importorskip("unswbc")
     out, actor, integer = exported
-    report = run_gate(out, actor, integer, games=4, sandbox=True, sandbox_turns=400)
+    report = run_gate(out, actor, integer, mask_level=MASK_LEVEL, games=4, sandbox=True, sandbox_turns=400)
     print(report.summary())
     assert report.passed and report.sandbox_turns > 0

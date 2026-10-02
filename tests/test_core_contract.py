@@ -6,8 +6,9 @@ the same header-only code for the observation, the masks and the action
 decoding (core/features.h), so if the two Views agree, everything agrees.
 This checks that they do on every turn of scripted games on the official and
 generated maps, that the masks are sound (level 0 and level 1 never hide an
-action that could survive), and pins the egocentric layout and the action
-decoding on hand-built positions.
+action that could survive; level 2 adds only the queen's rules), and pins the
+egocentric layout, the queen and threat features, and the action decoding on
+hand-built positions.
 """
 import pathlib
 import random
@@ -90,11 +91,14 @@ def test_training_view_equals_bot_view(label, text, seed, styles):
 
 def test_masks_never_hide_a_move_that_survives():
     """Every action level 0 masks, and every action level 1 masks, kills the
-    dragon when played (checked on a copy of the board)."""
-    stats = {"masked0": 0, "masked1": 0, "unmasked_fatal": 0, "turns": 0}
+    dragon when played (checked on a copy of the board). Level 2 masks more
+    only for a queen, and only its splits and head trades (which kill it)."""
+    stats = {"masked0": 0, "masked1": 0, "queen_splits": 0, "queen_trades": 0, "unmasked_fatal": 0, "turns": 0}
 
     def check(match, did, init, block):
-        _, mask0, mask1 = match.features(did)
+        _, (mask0, mask1, mask2) = match.features(did)
+        if did > 1:
+            assert (mask2 == mask1).all()
         for action in range(bccore.NUM_ACTIONS):
             if not mask0[action]:
                 assert match.probe(action), f"level 0 masked a surviving action {action}\n{block}"
@@ -102,6 +106,12 @@ def test_masks_never_hide_a_move_that_survives():
             elif not mask1[action] and mask1.any():
                 assert match.probe(action), f"level 1 masked a surviving action {action}\n{block}"
                 stats["masked1"] += 1
+            elif not mask2[action] and mask2.any():
+                if action == bccore.NUM_ACTIONS - 1:
+                    stats["queen_splits"] += 1
+                else:
+                    assert match.probe(action), f"level 2 masked a surviving move {action}\n{block}"
+                    stats["queen_trades"] += 1
             elif match.probe(action):
                 stats["unmasked_fatal"] += 1
         stats["turns"] += 1
@@ -109,6 +119,7 @@ def test_masks_never_hide_a_move_that_survives():
     for label, text, seed, styles in GAMES:
         play_stepwise(text, seed, styles, check)
     assert stats["masked0"] > 100 and stats["masked1"] > 1000, stats
+    assert stats["queen_splits"] > 100 and stats["queen_trades"] > 0, stats
 
 
 def test_observation_codes_are_in_range():
@@ -116,7 +127,7 @@ def test_observation_codes_are_in_range():
     seen_max = np.zeros(bccore.OBS_SIZE, dtype=np.int64)
 
     def check(match, did, init, block):
-        obs, _, _ = match.features(did)
+        obs, _ = match.features(did)
         np.maximum(seen_max, obs, out=seen_max)
 
     for label, text, seed, styles in GAMES[:6]:
@@ -158,7 +169,7 @@ def test_window_is_egocentric(facing, body):
     side, kx, ky = {"N": ("N", 8, 8), "S": ("N", 8, 9), "W": ("W", 8, 8), "E": ("W", 9, 8)}[facing]
     m = solo(body, kelp=[(side, kx, ky)])
     m.set_pearl(px, py)
-    obs, mask0, mask1 = m.features(0)
+    obs, (mask0, mask1, _) = m.features(0)
     pearls = plane(obs, 0)
     assert pearls[1, 4] == 1 and pearls.sum() == 1          # row 1 = two ahead, col 4 = one right
     assert plane(obs, 12)[3, 3] == 1                          # own head at the centre
@@ -184,22 +195,22 @@ def test_actions_decode_relative_to_the_facing():
 
 def test_level_zero_rules():
     m = solo([(8, 8), (7, 8)])
-    _, mask0, mask1 = m.features(0)
+    _, (mask0, mask1, _) = m.features(0)
     assert mask0[:12].all()
     assert mask0[12] == 0          # length 2 cannot split
     assert not mask1[3:12].any()   # nor pay for a second step: level 1 sees no pearl ahead
     m = solo([(8, 8), (7, 8)])
     m.set_pearl(9, 8)
-    _, _, mask1 = m.features(0)
+    _, (_, mask1, _) = m.features(0)
     assert list(mask1[3:6]) == [1, 1, 1]  # unless the first step eats one
     assert not m.probe(3)
     m = solo([(8, 8), (7, 8), (6, 8), (5, 8)])
-    _, mask0, _ = m.features(0)
+    _, (mask0, _, _) = m.features(0)
     assert mask0.all()
     m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8), (5, 8)]), ("B", [(12, 12), (13, 12)]),
                                        ("A", [(2, 2), (2, 3)])], unit_limit=2), 0)
     m.begin()
-    _, mask0, _ = m.features(0)
+    _, (mask0, _, _) = m.features(0)
     assert mask0[12] == 0          # the unit limit is reached
 
 
@@ -211,7 +222,7 @@ def test_level_one_sees_through_a_visible_portal():
     text = make_map(16, 16, [("A", body), ("B", blocker)], portals=[(5, "W", 9, 8), (5, "W", 11, 6)])
     m = bccore.Match(text, 0)
     m.begin()
-    obs, mask0, mask1 = m.features(0)
+    obs, (mask0, mask1, _) = m.features(0)
     assert mask0[0] == 1 and mask1[0] == 0
     assert scalar(obs, 19) == 0     # the landing tile is known
     assert m.probe(0)
@@ -222,7 +233,7 @@ def test_portal_out_of_sight_is_unknown_and_unmasked():
     text = make_map(16, 16, [("A", body), ("B", [(13, 13), (14, 13)])], portals=[(5, "W", 9, 8), (5, "W", 2, 14)])
     m = bccore.Match(text, 0)
     m.begin()
-    obs, _, mask1 = m.features(0)
+    obs, (_, mask1, _) = m.features(0)
     assert scalar(obs, 19) == 1 and mask1[0] == 1
 
 
@@ -234,7 +245,7 @@ def test_level_one_knows_the_tail_moves_on(pearl):
     m = solo([(8, 8), (9, 8), (9, 9), (8, 9), (7, 9)])
     if pearl:
         m.set_pearl(7, 8)
-    _, _, mask1 = m.features(0)
+    _, (_, mask1, _) = m.features(0)
     forward_then_left = 3 + 3 * 0 + 2
     assert m.probe(forward_then_left) == pearl
     assert mask1[forward_then_left] == (0 if pearl else 1)
@@ -245,8 +256,67 @@ def test_reach_sees_a_pocket():
     # Facing east at (8, 8); the tile ahead, (9, 8), is closed by kelp on its
     # north, east and south sides: stepping forward is safe now but a trap.
     m = solo([(8, 8), (7, 8), (6, 8)], kelp=[("N", 9, 8), ("W", 10, 8), ("N", 9, 9)])
-    obs, _, mask1 = m.features(0)
+    obs, (_, mask1, _) = m.features(0)
     assert mask1[0] == 1                                   # the step itself is not fatal
     assert scalar(obs, 32) == 1 and scalar(obs, 35) == 0   # forward: one tile, going nowhere
     assert scalar(obs, 33) > 20 and scalar(obs, 36) == 1   # right: open water, out of sight
     assert scalar(obs, 34) > 20 and scalar(obs, 37) == 1
+
+
+def queen_position():
+    """A's queen (0, length 4, facing east at (8, 8)) between an enemy head
+    right ahead (dragon 3, facing west at (9, 8)) and an ally head on its
+    left (dragon 2, facing south at (8, 7)); B's queen (1) far away."""
+    m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8), (5, 8)]), ("B", [(13, 13), (14, 13)]),
+                                       ("A", [(8, 7), (8, 6), (8, 5)]), ("B", [(9, 8), (10, 8), (11, 8)])]), 0)
+    m.begin()
+    return m
+
+
+def test_head_trades_and_the_queen():
+    m = queen_position()
+    _, (mask0, mask1, mask2) = m.features(0)
+    forward, right, left, split = 0, 1, 2, 12
+    assert mask0[forward] and mask0[left] and mask0[split]
+    assert mask1[forward] == 1     # onto an enemy head: a trade, the policy's call...
+    assert mask1[left] == 0        # ...but never onto an ally's head (two of ours die)
+    assert m.probe(left) and m.probe(forward)
+    assert mask1[split] == 1 and mask1[right] == 1
+    assert mask2[forward] == 0     # the queen trades with nobody
+    assert mask2[split] == 0       # and never splits
+    assert mask2[right] == 1
+    # The ally (2) faces south onto the queen's head: masked at level 1.
+    _, (_, mask1, mask2) = m.features(2)
+    assert mask1[forward] == 0 and (mask2 == mask1).all()
+    # The enemy (3) faces west onto A's queen's head: a trade it may make.
+    _, (_, mask1, mask2) = m.features(3)
+    assert mask1[forward] == 1 and mask2[forward] == 1
+
+
+def test_queen_planes():
+    m = queen_position()
+    own_queen, enemy_queen = 22, 23
+    obs, _ = m.features(0)          # the queen sees itself as its team's queen
+    assert plane(obs, own_queen).sum() == 4 and plane(obs, own_queen)[3, 3] == 1
+    assert plane(obs, enemy_queen).sum() == 0
+    obs, _ = m.features(2)          # its ally sees the queen, not itself
+    assert plane(obs, own_queen).sum() == 4 and plane(obs, own_queen)[3, 3] == 0
+    obs, _ = m.features(3)          # the enemy sees A's queen (3 segments in sight) as the enemy queen
+    assert plane(obs, enemy_queen).sum() == 3 and plane(obs, own_queen).sum() == 0
+
+
+def test_enemy_reach():
+    m = queen_position()
+    obs, _ = m.features(0)
+    head_now, forward, right, left = 50, 38, 39, 40
+    # Dragon 3's head is one step from the queen's head: reachable in one.
+    assert scalar(obs, head_now) == 2
+    # Forward and left end on heads (trades): no landing tile.
+    assert scalar(obs, forward) == 0 and scalar(obs, left) == 0
+    # Right (south, to (8, 9)): dragon 3 could get there in two, via (9, 9).
+    assert scalar(obs, right) == 1
+    # Right then forward (to (8, 10)): out of its reach.
+    assert scalar(obs, 38 + 3 + 3 * 1 + 0) == 0
+    # The ally's own head, (8, 7), is two steps from dragon 3, via (9, 7).
+    obs, _ = m.features(2)
+    assert scalar(obs, head_now) == 1
