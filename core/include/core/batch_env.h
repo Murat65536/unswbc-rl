@@ -18,12 +18,13 @@
 //
 // Reward, per dragon, for its team: the result (+1 / -1 / 0) when the game
 // ends, plus potential-based shaping gamma * phi(next) - phi(now), with phi a
-// bounded function of the queens' and the teams' lengths, evaluated when the
-// dragon decides. Over a dragon's whole trajectory the shaping telescopes to
+// bounded function of the round-limit tiebreaks (the queens', the longest
+// dragons' and the teams' total lengths), evaluated when the dragon decides. Over a dragon's whole trajectory the shaping telescopes to
 // -phi(first decision), so it changes no optimal policy. A dragon that dies
 // waits for the result: its last transition completes when the game ends,
 // with the result discounted by the rounds in between.
 
+#include "core/careful.h"
 #include "core/features.h"
 #include "core/mapgen.h"
 #include "core/state_view.h"
@@ -46,7 +47,7 @@ namespace core {
 struct EnvConfig
 {
     int mThreads = 0; // 0: one per core
-    int mMaskLevel = 1;
+    int mMaskLevel = 2;
     /// Rounds after which a training game is cut (truncated, not scored):
     /// MAX_ROUNDS plays every game to its real end.
     int mMaxRounds = MAX_ROUNDS;
@@ -55,10 +56,12 @@ struct EnvConfig
     float mWin = 1.0f;
     float mLoss = -1.0f;
     float mDraw = 0.0f;
-    /// phi = scale * (queenWeight * (Qa - Qb) / (Qa + Qb + 2) + (1 - queenWeight) * (Ta - Tb) / (Ta + Tb + 2)),
-    /// with Q the queens' lengths (0 once dead) and T the teams' total lengths.
+    /// phi = scale * (wq * d(Qa, Qb) + wl * d(La, Lb) + (1 - wq - wl) * d(Ta, Tb)), d(a, b) = (a - b) / (a + b + 2),
+    /// with Q the queens' lengths (0 once dead), L the longest living dragons'
+    /// and T the teams' total lengths: the round-limit tiebreaks, in order.
     float mShaping = 0.5f;
     float mQueenWeight = 0.5f;
+    float mLongestWeight = 0.25f;
 
     // Generated levels: each value drawn uniformly per level from [lo, hi].
     int mWidthLo = 16, mWidthHi = 40;
@@ -84,6 +87,10 @@ struct EnvConfig
     /// the learner plays team (slot + episode) % 2. Scripted turns are played
     /// inside the environment, so only the learner's decisions come out.
     float mScriptedFrac = 0.0f;
+    /// The share of those scripted slots (the first ones) that play the
+    /// careful player instead, which survives to the round limit far more
+    /// often (see CarefulAction), so the round-limit tiebreaks decide games.
+    float mScriptedCareful = 0.0f;
 };
 
 /// The level a seed names: the same map and match seed every time, in any
@@ -112,8 +119,23 @@ struct EpisodeInfo
     int32_t mDragons = 0;
     std::array<int32_t, 2> mTotal{};
     std::array<int32_t, 2> mQueen{};
+    std::array<int32_t, 2> mLongest{};
+    /// The round each team's queen died in, or -1 if it lived.
+    std::array<int32_t, 2> mQueenDied{-1, -1};
+    /// How it died: 0 it lived; on its own move, 1 cornered (no move it
+    /// could see survives, and no split) or 2 not; or 3 rammed by an enemy's
+    /// head, 4 by an ally's.
+    std::array<int32_t, 2> mQueenDeath{};
+    /// How often each team's queen split.
+    std::array<int32_t, 2> mQueenSplits{};
+    /// What decided the game: 0 an elimination, then the first round-limit
+    /// tiebreak that differed: 1 the queens, 2 the longest dragons, 3 the
+    /// totals; 4 none (a draw); -1 cut at the training horizon.
+    int32_t mDecider = -1;
     /// The scripted player's team (0 A, 1 B), or -1 in a self-play slot.
     int32_t mScriptedTeam = -1;
+    /// Whether the scripted player was the careful one.
+    int32_t mScriptedCareful = 0;
 };
 
 /// A transition that ended without a next decision: at the game's end
@@ -212,6 +234,10 @@ class BatchEnv
         View mView;
         int64_t mTurns = 0;
         int mScriptedTeam = -1;
+        bool mCareful = false;
+        std::array<int32_t, 2> mQueenDied{-1, -1};
+        std::array<int32_t, 2> mQueenDeath{};
+        std::array<int32_t, 2> mQueenSplits{};
         /// Each scripted dragon's own generator (a fresh process each, so
         /// they all start from the same state, as the starter's do).
         std::vector<uint64_t> mScriptRng;
@@ -234,12 +260,16 @@ class BatchEnv
     /// decision is outstanding in the slot.
     void Advance(Slot& slot, int index);
     void PlayScripted(Slot& slot);
+    /// Plays the current dragon's turn (slot.mView is its view), noting
+    /// when and how a queen died in it.
+    void TakeTurn(Slot& slot, ControllerReply const& reply);
     void RunParallel(std::function<void(int, int)> const& work);
     void Gather();
 
     EnvConfig mConfig;
     std::vector<Slot> mSlots;
     int mScriptedSlots = 0;
+    int mCarefulSlots = 0;
     std::vector<GameState> mMapStates;
     std::mt19937_64 mSeeds;
     int64_t mStep = 0;

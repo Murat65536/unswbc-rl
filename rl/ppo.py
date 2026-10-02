@@ -480,6 +480,11 @@ class Trainer:
             if scripted:
                 out["scripted_win_rate"] = float(np.mean([e["outcome"] == 1 - e["scripted_team"] for e in scripted]))
                 out["scripted_games"] = len(scripted)
+                careful = [e for e in scripted if e["scripted_careful"]]
+                if careful:
+                    out["careful_win_rate"] = float(np.mean([e["outcome"] == 1 - e["scripted_team"] for e in careful]))
+                    out["careful_games"] = len(careful)
+            out.update(queen_stats(episodes))
         if self.plr is not None:
             out["plr_levels"] = self.plr.size
         return out
@@ -499,6 +504,8 @@ class Trainer:
             "plr": self.plr.state_dict() if self.plr is not None else None,
             "args": vars(self.args),
             "obs_size": OBS,
+            "obs_planes": bccore.NUM_PLANES,
+            "obs_scalars": bccore.NUM_SCALARS,
             "num_actions": ACTIONS,
             "mask_level": self.args.mask_level,
         }
@@ -515,6 +522,38 @@ class Trainer:
             self.plr.load_state_dict(state["plr"])
 
 
+def learner_teams(e: dict) -> tuple[str, ...]:
+    """The teams the learner played in a finished episode."""
+    if e["scripted_team"] >= 0:
+        return ("ab"[1 - e["scripted_team"]],)
+    if e["learner_team"] is not None:
+        return ("ab"[e["learner_team"]],)
+    return ("a", "b")
+
+
+def queen_stats(episodes: list[dict]) -> dict:
+    """How the learner's queens fared in the finished (not cut) games: the
+    share alive at the end, splits per game, and the share of round-limit
+    games the queens decided."""
+    done = [e for e in episodes if e["outcome"] in (0, 1, 2)]
+    sides = [(e, t) for e in done for t in learner_teams(e)]
+    if not sides:
+        return {}
+    out = {
+        "queen_alive": float(np.mean([e[f"queen_died_{t}"] < 0 for e, t in sides])),
+        "queen_splits": float(np.mean([e[f"queen_splits_{t}"] for e, t in sides])),
+    }
+    # How the learner's queens died, per game: cornered, another own move,
+    # rammed by an enemy, by an ally (see EpisodeInfo::mQueenDeath).
+    for code, name in ((1, "cornered"), (2, "own_move"), (3, "rammed"), (4, "rammed_by_ally")):
+        out[f"queen_death_{name}"] = float(np.mean([e[f"queen_death_{t}"] == code for e, t in sides]))
+    limit = [e for e in done if e["decider"] > 0]
+    if limit:
+        out["round_limit_rate"] = len(limit) / len(done)
+        out["queen_decided_rate"] = float(np.mean([e["decider"] == 1 for e in limit]))
+    return out
+
+
 def env_options(args) -> dict:
     options = {
         "threads": args.threads,
@@ -523,12 +562,14 @@ def env_options(args) -> dict:
         "gamma": args.gamma,
         "shaping": args.shaping,
         "queen_weight": args.queen_weight,
+        "longest_weight": args.longest_weight,
         "width": tuple(args.width),
         "height": tuple(args.height),
         "dragons_per_team": tuple(args.dragons_per_team),
         "kelp": tuple(args.kelp),
         "portal_pairs": tuple(args.portal_pairs),
         "scripted_frac": args.scripted_frac,
+        "scripted_careful": args.scripted_careful,
     }
     if args.official_maps > 0:
         options["maps"] = official_maps()

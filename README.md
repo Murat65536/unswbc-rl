@@ -36,28 +36,33 @@ version of the same network.
   the View the bot parses from the protocol text on every turn tested
   (`tests/test_core_contract.py`), so the observation, masks and action
   decoding agree by construction. Masks never hide an action that could
-  survive (checked by playing every masked action on a copy of the board).
+  survive (checked by playing every masked action on a copy of the board);
+  level 2 only narrows the queen's choices further (its shield).
 - **Throughput.** About 3M engine turns per second on one core (32×32
   boards), and about 0.65M full decisions per second (observation, masks,
   critic features and rewards included) from the batched environment on
   this 4-core machine (`python -m rl.bench_env`). Training on CPU here runs
-  at about 14k decisions per second end to end: PyTorch, not the
-  environment, is the bottleneck.
+  at about 30k decisions per second end to end (1024 games, 64-step
+  rollouts): PyTorch, not the environment, is the bottleneck.
 - **Bot.** The export gate holds the bot to the trained actor on every
   recorded turn, built natively and by the judge's clang in the judge's
-  metered sandbox: same observation, same action. A turn costs about 4M of
-  the 100M points (2.5M of that is the single write), 0.6 MB of memory, and
-  the zip is about 420 KB.
-- **Strength.** `bots/rl_bot_v2` (about 35M training decisions, roughly an
-  hour of iteration time on this 4-core CPU: 360 iterations of self-play
-  with the league and level replay, then 180 more with a quarter of the
-  games against the scripted random-safe player) beats the toolkit's
-  random starter in 106 of 108 games on the 15 official maps and 12
-  generated ones, both sides, two seeds, with no bot errors. Both losses
-  are trauma as team A, a round-limit tiebreak: the bot splits into many
-  short dragons and loses its queen in the maze, and the starter's single
-  dragon ends up the longest. `bots/rl_bot_v1` is the earlier NumPy bot,
-  kept as a baseline.
+  metered sandbox: same observation, same action. A turn costs about 4.1M
+  of the 100M points (2.5M of that is the single write), 0.6 MB of memory,
+  and the zip is about 460 KB.
+- **Strength.** `bots/rl_bot_v3` (v2's weights widened to the current
+  observation, then 700 iterations, about 46M more decisions, at mask
+  level 2 with the league, level replay and scripted opponents, most of
+  them the careful player; `models/rl_bot_v3.pt`) in the judge's sandbox,
+  with no bot errors:
+  - beats v2 in 151 of 162 games head to head (about +455 Elo);
+  - beats the toolkit's random starter in all 108 games on the 15 official
+    maps and 12 generated ones, both sides, two seeds (v2: 106);
+  - beats the careful scripted player in 45 of 54 (v2: 31).
+
+  Its queen dies in 28 of the 108 games against the starter (v2: 65), 12
+  of them on three maps where each queen starts in a dead end.
+  `bots/rl_bot_v2` and the earlier NumPy `bots/rl_bot_v1` are kept as
+  baselines.
 
 ## Setup
 
@@ -81,22 +86,33 @@ itself is C++20, as the judge builds it.
 ## Train, export, evaluate, submit
 
 ```bash
-# Train (CPU or CUDA; checkpoints are written atomically):
+# Train (CPU or CUDA; checkpoints are written atomically). --init-from starts
+# from an older checkpoint even across observation changes; --resume continues one:
 python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0.3 \
-    --kelp 0.0 0.25 --scripted-frac 0.25 \
+    --kelp 0.0 0.25 --scripted-frac 0.35 --scripted-careful 0.6 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
-# Export the actor as a C++ bot and run the export gate (native + judge sandbox):
-python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v2
+# models/rl_bot_v3.pt is the checkpoint bots/rl_bot_v3 was exported from (iteration
+# 700): actor, critic, optimizer, league and level replay. Continue it with the
+# same flags plus --resume models/rl_bot_v3.pt and a larger --iterations (keep
+# --games 1024: changing it across a resume is untested).
 
-# Play it against the random starter on the official and generated maps, both sides:
-python -m export.evaluate --bot bots/rl_bot_v2 --generated 12
+# Compare checkpoints quickly, natively, against the careful scripted player:
+python -m rl.eval_env checkpoints/run1/ckpt_000500.pt checkpoints/run1/latest.pt --opponent careful
+
+# Export the actor as a C++ bot and run the export gate (native + judge sandbox):
+python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v4
+
+# Play it in the judge's sandbox, both sides of the official and generated maps,
+# against the random starter, the careful player, or another bot:
+python -m export.evaluate --bot bots/rl_bot_v4 --generated 12
+python -m export.evaluate --bot bots/rl_bot_v4 --opponent careful --generated 12
 # Or decide whether a new version beats an old one (SPRT, Elo bounds 0 and 30):
-python -m export.evaluate --bot bots/new --opponent bots/rl_bot_v2 --sprt 0 30
+python -m export.evaluate --bot bots/rl_bot_v4 --opponent bots/rl_bot_v3 --sprt 0 30
 
 # The toolkit's own commands work too:
-unswbc run maps/arena.map bots/rl_bot_v2 bots/rl_bot_v2 --sandbox -v
-unswbc submit bots/rl_bot_v2 -n rl-v2 -d "PPO self-play, C++ int8"
+unswbc run maps/arena.map bots/rl_bot_v3 bots/rl_bot_v3 --sandbox -v
+unswbc submit bots/rl_bot_v3 -n rl-v3 -d "PPO self-play, C++ int8, queen shield"
 ```
 
 ## How it works
@@ -115,21 +131,30 @@ Seeded with the match seed, a game here is the judge's game, pearls and all.
 reader for the wire protocol. **`features.h`** computes everything else from a
 View only:
 
-- an egocentric observation of 1116 uint8 codes: 22 planes over the 7×7
+- an egocentric observation of 1227 uint8 codes: 24 planes over the 7×7
   window rotated so the dragon faces up (pearls, countdowns, kelp and
   portals by relative side, own/ally/enemy heads and bodies with their
-  relative headings), then 38 scalars (length, free sprint steps, units,
-  round, queen, split legality, per-move flags: visibly fatal, pearl,
-  enemy or ally head, out of sight; and, past each first step, how many
-  tiles are reachable within the window and whether that region goes on
-  out of sight, so pockets that would trap the dragon show up);
+  relative headings, and the segments of this team's queen and of the
+  enemy queen), then 51 scalars (length, free sprint steps, units, round,
+  queen, split legality, per-move flags: visibly fatal, pearl, enemy or
+  ally head, out of sight; past each first step, how many tiles are
+  reachable within the window and whether that region goes on out of
+  sight, so pockets that would trap the dragon show up; and, for where
+  each move ends and for the head's tile now, whether a visible enemy head
+  could reach it before this dragon moves again);
 - 13 relative actions: one step forward/right/left, two steps (each
   forward/right/left, free from length 5), and splitting off the rear half;
 - masks: level 0 only removes an illegal split; level 1 also removes moves
   the dragon can see are certain death (kelp, bodies, through portals whose
   far end is in sight, its own tail when it knows the tail moves on, a
-  second step it cannot pay for), falling back to level 0 if nothing is
-  left.
+  second step it cannot pay for, an ally's head); level 2, the default,
+  also shields the queen, which decides the first round-limit tiebreak: it
+  never moves onto a head, keeps to open water (regions that go on out of
+  sight, not closed ones, which trap it sooner or later) and out of one
+  step's reach of enemy heads while it has a move that does, and splits
+  only when it has no move left. Each level falls back to the
+  one below if it would leave nothing, and a dragon with only fatal moves
+  still avoids taking an ally with it.
 
 The bot compiles these two headers unchanged. Training builds the View
 straight from the engine (**`state_view.h`**), and also gives the critic
@@ -141,8 +166,10 @@ turn order, so every decision sees the board exactly as it is on that
 dragon's turn, and a split child is asked later in its birth round), and the
 next observations go straight into the trainer's tensors. A dragon's reward is
 its team's result (+1/−1/0, discounted to its last decision; a dead dragon
-waits for it) plus potential-based shaping on the queens' and teams' lengths,
-which telescopes to a constant. A level is a 64-bit seed naming the same
+waits for it) plus potential-based shaping on the round-limit tiebreaks in
+their order (the queens' lengths, the longest dragons', the teams' totals),
+which telescopes to a constant. Each finished game reports when each queen
+died, how often it split and which tiebreak decided the game. A level is a 64-bit seed naming the same
 generated (or official) map and match seed in any process, so levels can be
 replayed. `--max-rounds` below 500 cuts games with bootstrap observations.
 
@@ -154,15 +181,20 @@ and privileged. A share of game slots pit the learner against frozen
 snapshots (a league), another share against a scripted random-safe player
 played inside the environment (`--scripted-frac`; self-play alone never
 punished losing the queen early, since both sides did it), and Prioritized
-Level Replay picks levels.
+Level Replay picks levels. The log follows the learner's queen: how often
+it is alive at the end and how often it split. New observation features are
+only ever appended, so `--init-from` can start a run from a checkpoint
+trained on an older layout, with zero weights on the new inputs
+(`rl/warm_start.py`).
 
 **`export/`** turns a checkpoint into a bot: `quantize.py` derives the
 integer actor (int8 weights, int32 accumulation, fixed-point requantisation),
 `bot/net.h` runs it with WASM SIMD in the judge, and `gate.py` requires the
 compiled bot to agree with training on every recorded turn, natively and in
 the judge's sandbox, reporting points, memory and zip size. `evaluate.py`
-plays it against the random starter (or any bot) in the sandbox, and with
-`--sprt` runs a sequential test between two versions.
+plays it against the random starter (or any bot) in the sandbox, reporting
+how the queens fared (when each died and how, queen splits) and what decided
+each game, and with `--sprt` runs a sequential test between two versions.
 
 ## Tests
 
@@ -170,9 +202,10 @@ plays it against the random starter (or any bot) in the sandbox, and with
 | --- | --- |
 | `test_fidelity.py` | our engine = the judge's engine, turn for turn, full seeded games |
 | `test_rules.py` | individual rules on hand-built boards; the occupancy grid; generated boards = their loaded text |
-| `test_core_contract.py` | training's View = the bot's View on every turn; masks are sound; rotation and decoding |
-| `test_env.py` | every decision saw its turn's board; children in their birth round; shaping telescopes; horizon cuts and bootstraps; threads don't change games |
+| `test_core_contract.py` | training's View = the bot's View on every turn; masks are sound (level 2: only the queen's rules); rotation, decoding, queen planes, enemy reach |
+| `test_env.py` | every decision saw its turn's board; children in their birth round; shaping telescopes; horizon cuts and bootstraps; threads don't change games; queen deaths, splits and deciders are reported |
 | `test_ppo.py` | rows complete once; vectorised GAE = a plain reference |
+| `test_warm_start.py` | an actor or critic widened to a newer observation computes what it did before |
 | `test_quantize.py` | the integer actor = the QAT float actor |
 | `test_export.py` | the compiled bot = the integer actor (natively; sandbox with `RUN_SANDBOX_TESTS=1`) |
 
@@ -180,11 +213,18 @@ plays it against the random starter (or any bot) in the sandbox, and with
 
 - **Sonar is unused.** The View carries messages and echoes, but the
   observation and actions do not use them yet.
-- **Queen and longest dragon.** The bot still under-values the round-limit
-  tiebreak order (queen, then longest, then total): it splits freely and
-  risks its queen. Shaping on the longest dragon rather than the total,
-  or longer training against opponents that survive to the limit, are
-  the obvious next steps.
+- **The queen still gets cornered.** With the level-2 shield the queen no
+  longer trades heads, splits by choice or is rammed by its allies, but it
+  still dies when no move it can see survives: a long queen in its own
+  coil, a short one in a dead-end corridor, or one boxed in by allies. A
+  7×7 window shows little of a long body; sonar, or allies keeping clear
+  of the queen, may help. (On autarky, dilemma and slithery_fight each
+  queen starts at the mouth of a dead-end corridor and is lost by round 5
+  whatever it does.)
+- **The longest-dragon tiebreak.** When both queens die, the bot's habit
+  of splitting into many short dragons loses the second tiebreak to
+  opponents that keep one long dragon (most of v3's losses to the careful
+  player).
 - **The policy is an MLP.** A small convolutional or attention trunk over
   the window would likely learn faster; the points budget leaves room for
   a much bigger network (a turn uses about 4% of it).

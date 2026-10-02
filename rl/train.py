@@ -27,10 +27,14 @@ def parse_args(argv=None):
     env = p.add_argument_group("environment")
     env.add_argument("--games", type=int, default=1024, help="game slots stepped together")
     env.add_argument("--threads", type=int, default=0, help="environment threads (0: one per core)")
-    env.add_argument("--mask-level", type=int, default=1, choices=(0, 1))
+    env.add_argument("--mask-level", type=int, default=2, choices=(0, 1, 2),
+                     help="0: rules; 1: also visibly certain death; 2: also the queen never splits or trades heads")
     env.add_argument("--max-rounds", type=int, default=500, help="training horizon (500 plays every game out)")
     env.add_argument("--shaping", type=float, default=0.5, help="scale of the potential-based shaping")
-    env.add_argument("--queen-weight", type=float, default=0.5)
+    env.add_argument("--queen-weight", type=float, default=0.5,
+                     help="share of the shaping on the queens' lengths (the first round-limit tiebreak)")
+    env.add_argument("--longest-weight", type=float, default=0.25,
+                     help="share on the longest dragons (the second); the rest goes to the totals (the third)")
     env.add_argument("--width", type=int, nargs=2, default=(16, 40))
     env.add_argument("--height", type=int, nargs=2, default=(16, 40))
     env.add_argument("--dragons-per-team", type=int, nargs=2, default=(1, 4))
@@ -65,6 +69,9 @@ def parse_args(argv=None):
     league.add_argument("--opponent-every", type=int, default=5)
     league.add_argument("--scripted-frac", type=float, default=0.0,
                         help="share of game slots (the last ones) where one team is a scripted random-safe player")
+    league.add_argument("--scripted-careful", type=float, default=0.0,
+                        help="share of those scripted slots that play the careful player instead (safe steps with "
+                             "room, pearls and distance from enemy heads; it survives to the round limit more)")
     league.add_argument("--plr-replay", type=float, default=0.5, help="chance a new level is a replayed one (0: off)")
     league.add_argument("--plr-capacity", type=int, default=4000)
     league.add_argument("--plr-temperature", type=float, default=0.3)
@@ -77,6 +84,9 @@ def parse_args(argv=None):
     run.add_argument("--checkpoint-dir", default="checkpoints")
     run.add_argument("--checkpoint-every", type=int, default=20)
     run.add_argument("--resume", default=None, help="a checkpoint to continue from")
+    run.add_argument("--init-from", default=None,
+                     help="start a new run from a checkpoint's actor, critic and league, even one trained on an "
+                          "older observation layout (see rl/warm_start.py)")
     run.add_argument("--log-csv", default=None)
     return p.parse_args(argv)
 
@@ -100,11 +110,18 @@ def main(argv=None):
     if args.resume:
         trainer.load_state_dict(torch.load(args.resume, map_location="cpu", weights_only=False))
         print(f"resumed from {args.resume} at iteration {trainer.iteration}")
+    elif args.init_from:
+        from .warm_start import init_from
+
+        init_from(trainer, torch.load(args.init_from, map_location="cpu", weights_only=False))
+        print(f"initialised from {args.init_from}")
 
     writer = None
     log_file = None
     columns = ["iteration", "decisions", "trained_rows", "episodes", "mean_rounds", "mean_total_length", "draw_rate",
-               "league_win_rate", "scripted_win_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+               "league_win_rate", "scripted_win_rate", "careful_win_rate", "queen_alive", "queen_splits", "queen_death_cornered", "queen_death_own_move",
+               "queen_death_rammed", "queen_death_rammed_by_ally", "round_limit_rate",
+               "queen_decided_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
                "decisions_per_second", "env_seconds", "seconds", "carried", "plr_levels"]
     if args.log_csv:
         new = not os.path.exists(args.log_csv)
@@ -124,6 +141,10 @@ def main(argv=None):
             line += f" | league win {stats['league_win_rate']:.2f} ({stats['league_games']})"
         if "scripted_win_rate" in stats:
             line += f" | vs scripted {stats['scripted_win_rate']:.2f} ({stats['scripted_games']})"
+        if "careful_win_rate" in stats:
+            line += f" careful {stats['careful_win_rate']:.2f} ({stats['careful_games']})"
+        if "queen_alive" in stats:
+            line += f" | queen alive {stats['queen_alive']:.2f} splits {stats['queen_splits']:.2f}"
         if "entropy" in stats:
             line += f" | H {stats['entropy']:.3f} kl {stats['approx_kl']:.4f} vL {stats['value_loss']:.4f}"
         print(line, flush=True)

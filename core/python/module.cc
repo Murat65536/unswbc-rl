@@ -1,6 +1,7 @@
 // Python bindings for the C++ core (module `bccore`).
 
 #include "core/batch_env.h"
+#include "core/careful.h"
 #include "core/features.h"
 #include "core/mapgen.h"
 #include "core/state_view.h"
@@ -81,16 +82,17 @@ core::View ViewFromBlocks(std::string const& init, std::string const& round)
     return reader.Current();
 }
 
-/// (observation, level-0 mask, level-1 mask) for a View.
+/// (observation, masks) for a View: masks[level] is the mask at that level.
 nb::tuple Features(core::View const& view)
 {
     std::vector<uint8_t> obs(core::kObsSize);
     core::Encode(view, obs.data());
-    std::vector<uint8_t> mask0(core::kNumActions);
-    std::vector<uint8_t> mask1(core::kNumActions);
-    core::Mask(view, 0, mask0.data());
-    core::Mask(view, 1, mask1.data());
-    return nb::make_tuple(ToNumpy(std::move(obs)), ToNumpy(std::move(mask0)), ToNumpy(std::move(mask1)));
+    std::vector<uint8_t> masks(core::kMaskLevels * core::kNumActions);
+    for (int level = 0; level < core::kMaskLevels; level++)
+    {
+        core::Mask(view, level, masks.data() + level * core::kNumActions);
+    }
+    return nb::make_tuple(ToNumpy(std::move(obs)), ToNumpy2(std::move(masks), core::kNumActions));
 }
 
 /// None if the two Views are equal, else where they first differ.
@@ -493,6 +495,7 @@ core::EnvConfig ConfigFrom(nb::dict const& options)
         else if (name == "draw") c.mDraw = nb::cast<float>(value);
         else if (name == "shaping") c.mShaping = nb::cast<float>(value);
         else if (name == "queen_weight") c.mQueenWeight = nb::cast<float>(value);
+        else if (name == "longest_weight") c.mLongestWeight = nb::cast<float>(value);
         else if (name == "width") pair(c.mWidthLo, c.mWidthHi);
         else if (name == "height") pair(c.mHeightLo, c.mHeightHi);
         else if (name == "symmetries")
@@ -514,6 +517,7 @@ core::EnvConfig ConfigFrom(nb::dict const& options)
         else if (name == "maps") c.mMaps = nb::cast<std::vector<std::string>>(value);
         else if (name == "map_prob") c.mMapProb = nb::cast<float>(value);
         else if (name == "scripted_frac") c.mScriptedFrac = nb::cast<float>(value);
+        else if (name == "scripted_careful") c.mScriptedCareful = nb::cast<float>(value);
         else throw nb::value_error(("unknown environment option: " + name).c_str());
     }
     return c;
@@ -595,7 +599,8 @@ class PyBatchEnv
         out["boot_mask"] = ToNumpy2(mEnv.BootMask(), core::kNumActions);
         out["boot_priv"] = ToNumpy2(mEnv.BootPrivileged(), core::kPrivileged);
 
-        std::vector<int32_t> slot, mapIndex, rounds, outcome, dragons, totalA, totalB, queenA, queenB, scripted;
+        std::vector<int32_t> slot, mapIndex, rounds, outcome, dragons, totalA, totalB, queenA, queenB, longestA, longestB,
+            queenDiedA, queenDiedB, queenDeathA, queenDeathB, queenSplitsA, queenSplitsB, decider, scripted, careful;
         std::vector<uint64_t> level;
         for (core::EpisodeInfo const& e : mEnv.Episodes())
         {
@@ -609,7 +614,17 @@ class PyBatchEnv
             totalB.push_back(e.mTotal[1]);
             queenA.push_back(e.mQueen[0]);
             queenB.push_back(e.mQueen[1]);
+            longestA.push_back(e.mLongest[0]);
+            longestB.push_back(e.mLongest[1]);
+            queenDiedA.push_back(e.mQueenDied[0]);
+            queenDiedB.push_back(e.mQueenDied[1]);
+            queenDeathA.push_back(e.mQueenDeath[0]);
+            queenDeathB.push_back(e.mQueenDeath[1]);
+            queenSplitsA.push_back(e.mQueenSplits[0]);
+            queenSplitsB.push_back(e.mQueenSplits[1]);
+            decider.push_back(e.mDecider);
             scripted.push_back(e.mScriptedTeam);
+            careful.push_back(e.mScriptedCareful);
         }
         nb::dict episodes;
         episodes["slot"] = ToNumpy(std::move(slot));
@@ -622,7 +637,17 @@ class PyBatchEnv
         episodes["total_b"] = ToNumpy(std::move(totalB));
         episodes["queen_a"] = ToNumpy(std::move(queenA));
         episodes["queen_b"] = ToNumpy(std::move(queenB));
+        episodes["longest_a"] = ToNumpy(std::move(longestA));
+        episodes["longest_b"] = ToNumpy(std::move(longestB));
+        episodes["queen_died_a"] = ToNumpy(std::move(queenDiedA));
+        episodes["queen_died_b"] = ToNumpy(std::move(queenDiedB));
+        episodes["queen_death_a"] = ToNumpy(std::move(queenDeathA));
+        episodes["queen_death_b"] = ToNumpy(std::move(queenDeathB));
+        episodes["queen_splits_a"] = ToNumpy(std::move(queenSplitsA));
+        episodes["queen_splits_b"] = ToNumpy(std::move(queenSplitsB));
+        episodes["decider"] = ToNumpy(std::move(decider));
         episodes["scripted_team"] = ToNumpy(std::move(scripted));
+        episodes["scripted_careful"] = ToNumpy(std::move(careful));
         out["episodes"] = episodes;
         return out;
     }
@@ -687,6 +712,7 @@ NB_MODULE(bccore, m)
     m.attr("NUM_SCALARS") = core::kScalars;
     m.attr("NUM_ACTIONS") = core::kNumActions;
     m.attr("NUM_PRIVILEGED") = core::kPrivileged;
+    m.attr("NUM_MASK_LEVELS") = core::kMaskLevels;
     m.def(
         "feature_scales",
         [] {
@@ -702,7 +728,21 @@ NB_MODULE(bccore, m)
         "features_from_blocks",
         [](std::string const& init, std::string const& round) { return Features(ViewFromBlocks(init, round)); },
         "init"_a, "round_block"_a,
-        "(observation, level-0 mask, level-1 mask) from the protocol text, as the bot computes them.");
+        "(observation, masks) from the protocol text, as the bot computes them; masks[level] is that level's.");
+    m.def(
+        "careful_action",
+        [](std::string const& init, std::string const& round, uint32_t noise) {
+            return core::CarefulAction(ViewFromBlocks(init, round), noise);
+        },
+        "init"_a, "round_block"_a, "noise"_a, "The careful scripted player's action (core/careful.h).");
+    m.def(
+        "careful_noise",
+        [](uint64_t state) {
+            uint32_t const noise = core::CarefulNoise(state);
+            return nb::make_tuple(noise, state);
+        },
+        "state"_a, "(noise, next state) of a careful dragon's generator.");
+    m.attr("CAREFUL_SEED") = core::kCarefulSeed;
     m.def(
         "decode_action",
         [](std::string const& init, std::string const& round, int action) {

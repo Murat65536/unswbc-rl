@@ -97,7 +97,7 @@ def test_every_decision_saw_its_turns_board():
     rng = np.random.default_rng(1)
     env = bccore.BatchEnv(1, 0, OPTIONS)
     env.set_next_level(0, 123)
-    records = run(env, 1500, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
+    records = run(env, 6000, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
     seeds = episode_seeds(records, 123, 50_000)
 
     by_episode = {}
@@ -116,9 +116,9 @@ def test_every_decision_saw_its_turns_board():
             did, team, round_num, _ = (int(v) for v in buf["info"][0])
             assert match.current() == did and match.round == round_num
             init, block = match.init_block(did), match.round_block(did)
-            obs, mask0, mask1 = bccore.features_from_blocks(init, block)
+            obs, masks = bccore.features_from_blocks(init, block)
             assert np.array_equal(obs, buf["obs"][0])
-            assert np.array_equal(mask1, buf["mask"][0])
+            assert np.array_equal(masks[2], buf["mask"][0])  # the environment's default level
             if did in split_round:
                 assert split_round.pop(did) == round_num  # a child acts in its birth round
                 births += 1
@@ -129,10 +129,15 @@ def test_every_decision_saw_its_turns_board():
     assert births > 0
 
 
-def phi(priv, shaping=0.5, queen_weight=0.5):
+def phi(priv, shaping=0.5, queen_weight=0.5, longest_weight=0.25):
+    def lead(a, b):
+        return (a - b) / (a + b + 2)
+
     qa, qb = priv[6] * 32, priv[7] * 32
+    la, lb = priv[4] * 32, priv[5] * 32
     ta, tb = priv[2] * 64, priv[3] * 64
-    return shaping * (queen_weight * (qa - qb) / (qa + qb + 2) + (1 - queen_weight) * (ta - tb) / (ta + tb + 2))
+    total_weight = 1 - queen_weight - longest_weight
+    return shaping * (queen_weight * lead(qa, qb) + longest_weight * lead(la, lb) + total_weight * lead(ta, tb))
 
 
 @pytest.mark.parametrize("gamma,scripted", [(1.0, 0.0), (0.95, 0.0), (0.95, 0.5)])
@@ -140,11 +145,11 @@ def test_shaping_telescopes_and_results_arrive_discounted(gamma, scripted):
     """Over each dragon's whole trajectory, sum_i gamma^i r_i equals
     gamma^K * result - phi(first decision), K the rounds from its first
     decision to the end: the shaping only ever subtracts the start."""
-    options = dict(OPTIONS, gamma=gamma, shaping=0.5, queen_weight=0.5, scripted_frac=scripted)
+    options = dict(OPTIONS, gamma=gamma, shaping=0.5, queen_weight=0.5, longest_weight=0.25, scripted_frac=scripted)
     n = 16
     env = bccore.BatchEnv(n, 3, options)
     rng = np.random.default_rng(3)
-    records = run(env, 1500, rng)
+    records = run(env, 2500, rng)
 
     rows = {}       # row -> (slot, episode, dragon, team, round, phi)
     reward = {}     # row -> reward of the transition it starts
@@ -268,3 +273,65 @@ def test_scripted_slots_only_ask_the_learner():
             else:
                 assert e["scripted_team"][i] == -1
     assert len({episode % 2 for slot, episode in episodes_seen}) == 2
+
+
+@pytest.mark.parametrize("mask_level", [1, 2])
+def test_episodes_report_the_queens(mask_level):
+    """Each finished game reports when each queen died, how often it split
+    and which tiebreak decided the game. At mask level 2 a queen may split
+    only when it has no other move left."""
+    n = 16
+    env = bccore.BatchEnv(n, 4, dict(OPTIONS, mask_level=mask_level))
+    rng = np.random.default_rng(4)
+    records = run(env, 2500, rng, split_bias=0.3)
+    games, splits, deciders, last_resort, causes = 0, 0, set(), 0, set()
+    for buf, actions, out in records:
+        for slot in range(n):
+            if buf["info"][slot][0] <= 1 and buf["mask"][slot][12] and mask_level == 2:
+                assert not buf["mask"][slot][:12].any()
+                last_resort += 1
+        e = out["episodes"]
+        for i in range(len(e["slot"])):
+            if e["outcome"][i] == 3:
+                continue
+            games += 1
+            for t in "ab":
+                died, length = e[f"queen_died_{t}"][i], e[f"queen_{t}"][i]
+                assert (died >= 0) == (length == 0) == (e[f"queen_death_{t}"][i] > 0)
+                causes.add(int(e[f"queen_death_{t}"][i]))
+                assert -1 <= died <= e["rounds"][i]
+                splits += e[f"queen_splits_{t}"][i]
+            decider = e["decider"][i]
+            deciders.add(int(decider))
+            if decider == 0:
+                assert e["rounds"][i] < 500
+            elif decider == 1:
+                assert e["queen_a"][i] != e["queen_b"][i]
+            elif decider == 2:
+                assert e["queen_a"][i] == e["queen_b"][i] and e["longest_a"][i] != e["longest_b"][i]
+            if decider in (1, 2, 3):
+                assert e["outcome"][i] in (0, 1)
+    assert games >= 20 and 0 in deciders
+    assert {1, 2, 3} <= causes  # cornered, another own move, rammed by an enemy
+    assert splits > 0 if mask_level == 1 else splits <= last_resort
+
+
+def test_the_careful_player_outlasts_the_random_one():
+    """Half the scripted slots play the careful player, half the random-safe
+    one, against random allowed moves: the careful player wins far more
+    often, and its games last longer."""
+    n = 16
+    env = bccore.BatchEnv(n, 6, dict(OPTIONS, scripted_frac=1.0, scripted_careful=0.5))
+    rng = np.random.default_rng(6)
+    records = run(env, 2500, rng)
+    wins, rounds = {0: [], 1: []}, {0: [], 1: []}
+    for buf, actions, out in records:
+        e = out["episodes"]
+        for i in range(len(e["slot"])):
+            careful = int(e["scripted_careful"][i])
+            assert careful == (e["slot"][i] < n // 2)
+            wins[careful].append(e["outcome"][i] == e["scripted_team"][i])
+            rounds[careful].append(e["rounds"][i])
+    assert len(wins[0]) > 20 and len(wins[1]) > 10
+    assert np.mean(wins[1]) > np.mean(wins[0]) + 0.5, {k: np.mean(v) for k, v in wins.items()}
+    assert np.mean(rounds[1]) > np.mean(rounds[0])

@@ -1,6 +1,7 @@
 """Plays a bot against an opponent on the real engine, in the judge's sandbox.
 
     python -m export.evaluate --bot bots/rl_bot_v2                 # vs the C++ random starter
+    python -m export.evaluate --bot bots/rl_bot_v2 --opponent careful   # vs the careful scripted player
     python -m export.evaluate --bot bots/rl_bot_v2 --opponent bots/other --generated 12
     python -m export.evaluate --bot bots/new --opponent bots/old --sprt 0 30
 
@@ -8,7 +9,11 @@ Each map is played twice, the bot as team A and as team B, with the judge's
 engine (unswbc_engine.wasm), the judge's clang and the judge's metered
 sandbox, exactly as `unswbc run --sandbox` would. It reports wins, losses
 ("upsets" when the opponent is the random starter), draws, bot errors (a
-turn that timed out, crashed or wrote nothing) and points per turn.
+turn that timed out, crashed or wrote nothing) and points per turn, and how
+the queens fared: the round-limit tiebreak looks at the queens first (dragon
+0 for A, 1 for B; a dead queen has length 0), so it reports when each queen
+died and how often the bot's queen split (a split leaves the queen, which
+keeps its id, with only the front half).
 
 With --sprt ELO0 ELO1 it keeps playing (the maps again, with new seeds)
 until a sequential probability ratio test decides between "the bot is at
@@ -40,12 +45,34 @@ class GameRecord:
     reason: str
     errors: list = field(default_factory=list)
     deaths: Counter = field(default_factory=Counter)
+    splits: int = 0
+    queen_splits: int = 0
+    # (round, reason) when the queen died, else None.
+    queen_death: tuple | None = None
+    their_queen_death: tuple | None = None
+    # Lengths at the end (0 once dead): the first two round-limit tiebreaks.
+    queen: int = 0
+    their_queen: int = 0
+    longest: int = 0
+    their_longest: int = 0
 
     @property
     def outcome(self) -> str:
         if self.winner is None:
             return "draw"
         return "win" if self.winner == self.side else "loss"
+
+    @property
+    def decided_by(self) -> str:
+        """What decided the game: elimination, or the first round-limit
+        tiebreak that differed (queen, longest, total), or nothing (draw)."""
+        if self.reason == "elimination":
+            return "elimination"
+        if self.queen != self.their_queen:
+            return "queen"
+        if self.longest != self.their_longest:
+            return "longest"
+        return "total" if self.winner is not None else "draw"
 
 
 def expected_score(elo: float) -> float:
@@ -117,6 +144,9 @@ def play(engine, map_name: str, map_text: str, wasm: dict, side: str, seed: int,
         out = bot.ask(block)
         if bot.error is not None:
             record.errors.append(f"team {teams[did]} dragon {did}: {bot.error}")
+        if teams[did] == side and out.lstrip().startswith(b"SPLIT"):
+            record.splits += 1
+            record.queen_splits += did <= 1
         spent = bot.live[0] if bot.live else 0
         if spent:
             points["bot" if teams[did] == side else "opponent"].append(spent)
@@ -125,6 +155,11 @@ def play(engine, map_name: str, map_text: str, wasm: dict, side: str, seed: int,
     def death(did, round_num, reason):
         if teams.get(did) == side:
             record.deaths[reason] += 1
+        if did <= 1:
+            if teams.get(did) == side:
+                record.queen_death = (round_num, reason)
+            else:
+                record.their_queen_death = (round_num, reason)
         bot = live.pop(did, None)
         if bot is not None:
             bot.stop()
@@ -139,13 +174,35 @@ def play(engine, map_name: str, map_text: str, wasm: dict, side: str, seed: int,
     record.winner = result.winner
     record.rounds = result.rounds + 1
     record.reason = "elimination" if result.end_reason == 0 else "round limit"
+    ours, theirs = ("a", "b") if side == "A" else ("b", "a")
+    record.queen, record.their_queen = getattr(result, f"{ours}_queen"), getattr(result, f"{theirs}_queen")
+    record.longest, record.their_longest = getattr(result, f"{ours}_longest"), getattr(result, f"{theirs}_longest")
     return record
+
+
+def queen_summary(records: list[GameRecord]) -> list[str]:
+    n = len(records)
+    died = [r.queen_death for r in records if r.queen_death]
+    causes = Counter(reason for _, reason in died)
+    split_games = sum(r.queen_splits > 0 for r in records)
+    lines = [f"  our queen died in {len(died)} of {n} games"
+             + (f" (median round {int(np.median([d for d, _ in died]))}; "
+                + ", ".join(f"{k}x{v}" for k, v in sorted(causes.items(), key=str)) + ")" if died else ""),
+             f"  their queen died in {sum(r.their_queen_death is not None for r in records)} of {n} games",
+             f"  our queen split {sum(r.queen_splits for r in records)} times, in {split_games} of {n} games "
+             f"(all our dragons: {sum(r.splits for r in records)} splits)"]
+    for outcome, label in (("win", "wins"), ("loss", "losses"), ("draw", "draws")):
+        decided = Counter(r.decided_by for r in records if r.outcome == outcome)
+        if decided:
+            lines.append(f"  {label} decided by: " + ", ".join(f"{k} {v}" for k, v in decided.most_common()))
+    return lines
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--bot", required=True)
-    p.add_argument("--opponent", default=None, help="a bot folder (default: the C++ random starter)")
+    p.add_argument("--opponent", default=None,
+                   help="a bot folder, or 'careful' for the careful scripted player (default: the C++ random starter)")
     p.add_argument("--no-official", action="store_true")
     p.add_argument("--generated", type=int, default=6)
     p.add_argument("--seed", type=int, default=1)
@@ -160,8 +217,16 @@ def main():
     from .gate import build_wasm
 
     with tempfile.TemporaryDirectory() as tmp:
-        opponent = pathlib.Path(args.opponent) if args.opponent else random_starter(pathlib.Path(tmp))
-        name = "random starter" if args.opponent is None else opponent.name
+        if args.opponent is None:
+            opponent, name = random_starter(pathlib.Path(tmp)), "random starter"
+        elif args.opponent == "careful":
+            from .export_bot import write_careful_bot
+
+            opponent, name = pathlib.Path(tmp) / "careful", "careful player"
+            write_careful_bot(opponent)
+        else:
+            opponent = pathlib.Path(args.opponent)
+            name = opponent.name
         wasm_bot = build_wasm(pathlib.Path(args.bot))
         wasm_opponent = build_wasm(opponent)
         engine = EngineModule()
@@ -181,9 +246,13 @@ def main():
                     record = play(engine, map_name, text, wasm, side, seed, points)
                     records.append(record)
                     errors = f"  ERRORS: {record.errors[:2]}" if record.errors else ""
-                    deaths = ", ".join(f"{k}x{v}" for k, v in sorted(record.deaths.items()))
+                    deaths = ", ".join(f"{k}x{v}" for k, v in sorted(record.deaths.items(), key=str))
+                    queen = (f"queen died r{record.queen_death[0]}" if record.queen_death
+                             else f"queen {record.queen}") + f" vs {record.their_queen}"
+                    if record.queen_splits:
+                        queen += f", queen split {record.queen_splits}x"
                     line = (f"{map_name:28s} as {side}: {record.outcome:4s} after {record.rounds:3d} rounds "
-                            f"({record.reason}; our deaths {deaths or 'none'}){errors}")
+                            f"({record.decided_by}; {queen}; our deaths {deaths or 'none'}){errors}")
                     if args.sprt:
                         scores = [{"win": 1.0, "draw": 0.5, "loss": 0.0}[r.outcome] for r in records]
                         llr = sprt_llr(scores, *args.sprt)
@@ -210,7 +279,8 @@ def main():
         if values:
             print(f"  {who} points per turn: p50 {int(np.percentile(values, 50)):,} "
                   f"p99 {int(np.percentile(values, 99)):,} max {max(values):,}")
-    losses = [f"{r.map_name} as {r.side}" for r in records if r.outcome == "loss"]
+    print("\n".join(queen_summary(records)))
+    losses = [f"{r.map_name} as {r.side} ({r.decided_by})" for r in records if r.outcome == "loss"]
     if losses:
         print("  losses: " + "; ".join(losses))
     if args.sprt:

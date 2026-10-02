@@ -134,8 +134,8 @@ def record(integer: IntegerActor, mask_level: int, games: int, turns_per_game: i
                 mine[did] = Sequence(did, match.init_block(did))
             seq = mine[did]
             block = match.round_block(did)
-            obs, mask0, mask1 = bccore.features_from_blocks(seq.init, block)
-            mask = mask1 if mask_level == 1 else mask0
+            obs, masks = bccore.features_from_blocks(seq.init, block)
+            mask = masks[mask_level]
             action = int(integer.act(obs[None], mask[None])[0])
             reply = bccore.decode_action(seq.init, block, action)
             seq.blocks.append(block)
@@ -243,7 +243,7 @@ def zip_size(bot_dir: pathlib.Path) -> int:
     return len(buffer.getvalue())
 
 
-def run_gate(bot_dir: pathlib.Path, actor: Actor, integer: IntegerActor, mask_level: int = 1, games: int = 24,
+def run_gate(bot_dir: pathlib.Path, actor: Actor, integer: IntegerActor, mask_level: int = 2, games: int = 24,
              sandbox: bool = True, sandbox_turns: int = 3000) -> GateReport:
     from .export_bot import shared_files_match
 
