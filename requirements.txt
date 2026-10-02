@@ -1,4 +1,4 @@
-# Training (local dev or Colab). The exported competition bot itself only
-# ever uses numpy + the Python standard library -- see export/.
+# Training. The C++ core (module bccore) is built from this repository: see
+# README.md. The submitted bot is plain C++ and needs none of this.
 torch>=2.2
 numpy>=1.26

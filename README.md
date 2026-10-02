@@ -1,169 +1,181 @@
 # unswbc-rl
 
-A from-scratch reinforcement learning attempt at [UNSW Battlecode
-2026](https://game.battlecode.au/docs/overview) ("Dragons"), a Snake-like
-multi-agent competition: dragons grow by eating pearls, split, and die by
-colliding with kelp, themselves, or each other. Full rules are mirrored
-in `docs/rules/` (scraped from the docs site) and summarized below.
+Reinforcement learning for [UNSW Battlecode 2026](https://game.battlecode.au/docs/overview)
+("Dragons"), a Snake-like multi-agent game: dragons grow by eating pearls,
+split, and die by hitting kelp, themselves or each other. The rules are
+mirrored in `docs/rules/`.
 
-This trains one shared-weight policy for every dragon via self-play PPO on
-a custom Python simulator (fast enough for RL, not a wrapper around the
-real engine), then exports it to a plain-NumPy bot that runs under the
-actual `unswbc` judge and can be submitted to the ladder.
+One policy runs every dragon. It is trained by self-play PPO in PyTorch, on a
+C++ simulator that **is** the organisers' engine (patched to the current
+1.2.3 rules and checked turn by turn against the judge's own), and it is
+submitted as a C++ bot that runs the same observation code and an int8
+version of the same network.
+
+```
+ engine/  the organisers' rules engine (MIT), patched to 1.2.3   ─┐
+ core/    the shared core: view, observation, masks, actions      ├─ C++, one source of truth
+          + map generator + multithreaded batched environment     ─┘
+   │ bccore (nanobind)                         │ copied into the bot unchanged
+ rl/      PyTorch PPO trainer                  export/  exporter, int8 bot, export gate, evaluation
+```
 
 ## Status
 
-This is a working first attempt, not a tuned, ladder-ready bot. The
-pipeline (simulator -> self-play PPO -> export -> real engine) is built,
-tested, and validated end to end:
+- **Engine fidelity.** `tests/test_fidelity.py` plays full seeded games,
+  pearls included, on this engine and on the judge's real engine
+  (`unswbc_engine.wasm`, pinned by hash; unswbc 1.2.3 and 1.2.4 ship the
+  same one) with scripted players, and requires every init block, turn
+  block, death and result to be identical: the 15 official maps, generated
+  maps in all three symmetries (kelp, portals, small unit limits) and a
+  hand-built map that forces each round-limit tiebreak. 214 games and about
+  194,000 turns match; the test also asserts that every death reason,
+  free/paid/unpayable sprints, legal, illegal and unit-limit splits,
+  portals, sonar and every way a game ends came up. Reverting any of the
+  three rule patches makes it fail.
+- **Shared core.** The View training builds from the engine's state equals
+  the View the bot parses from the protocol text on every turn tested
+  (`tests/test_core_contract.py`), so the observation, masks and action
+  decoding agree by construction. Masks never hide an action that could
+  survive (checked by playing every masked action on a copy of the board).
+- **Throughput.** About 3M engine turns per second on one core (32×32
+  boards), and about 0.65M full decisions per second (observation, masks,
+  critic features and rewards included) from the batched environment on
+  this 4-core machine (`python -m rl.bench_env`). Training on CPU here runs
+  at about 14k decisions per second end to end: PyTorch, not the
+  environment, is the bottleneck.
+- **Bot.** The export gate holds the bot to the trained actor on every
+  recorded turn, built natively and by the judge's clang in the judge's
+  metered sandbox: same observation, same action. A turn costs about 4M of
+  the 100M points (2.5M of that is the single write), 0.6 MB of memory, and
+  the zip is about 420 KB.
+- **Strength.** See the pull request for the latest run against the random
+  starter (`python -m export.evaluate`).
 
-- `tests/test_engine.py` checks the simulator's rules (movement, pearls,
-  kelp, wraparound, self/head-to-head collisions, tiebreaks) against
-  `docs/rules/`.
-- `tests/test_obs_contract.py` feeds a synthetic game state through the
-  *real* `helper.py` and checks it produces the exact same observation
-  vector as the training-side encoder -- the thing most likely to silently
-  break a sim-trained policy on export.
-- A tiny smoke-training run (1v1, no kelp, 60 PPO iterations, a few
-  minutes) took mean episode length from ~2 to ~35 rounds and final
-  dragon length from ~3 to ~13, and the exported bot beat the
-  `unswbc init` starter bot in a real, judge-sandboxed match
-  (`bots/rl_bot_v1`, trained on `bots/maps/arena.map`). That's "learning is
-  working," not "ready to compete" -- see Roadmap.
-
-## Layout
-
-```
-sim/      From-scratch game engine + map generator + observation encoder + multi-agent env
-rl/       PPO (self-play, shared weights), the policy network, vectorized rollout collection
-export/   Turns a checkpoint into a submittable unswbc bot (NumPy-only inference)
-tests/    Engine unit tests + the sim<->bot observation contract test
-notebooks/train_colab.ipynb   Colab training notebook (GPU)
-bots/     unswbc bot projects: rl_bot (random starter, baseline) and rl_bot_v1 (exported demo)
-docs/rules/   Rules reference, scraped from game.battlecode.au/docs/overview
-```
-
-## Quickstart
+## Setup
 
 ```bash
-pip install -r requirements.txt   # torch + numpy, for training
-pip install unswbc                # the contest toolkit (also: `uv tool install unswbc`)
+python -m venv .venv && . .venv/bin/activate
+pip install -r requirements-dev.txt      # torch, numpy, nanobind, pytest, unswbc==1.2.3
 
-# Regenerate the real helper.py used by the bot + the contract test:
-unswbc init python bots/rl_bot
+# Build the C++ core (module bccore). Either:
+cmake -S . -B build -G Ninja -DPython_EXECUTABLE=$(which python) && cmake --build build
+#   (drops bccore*.so in the repository root, where the tests and rl/ find it)
+# or:
+pip install --no-build-isolation .      # scikit-build-core
 
-# Run the tests:
-python -m pytest tests -q
+python -m pytest -q                      # ~2 minutes; FIDELITY_SCALE=5 for a longer lockstep run
+RUN_SANDBOX_TESTS=1 python -m pytest tests/test_export.py   # also check a bot in the judge's sandbox
+```
 
-# Train (small/fast local example -- see notebooks/train_colab.ipynb for a
-# real curriculum on a Colab GPU):
-python -m rl.train --num-envs 16 --team-size 2 --width 16 --height 16 \
-    --max-rounds 250 --iterations 500 --rollout-length 128 \
-    --checkpoint-dir checkpoints --log-csv checkpoints/log.csv
+A C++23 compiler is needed for the core (GCC 13 or Clang 17 and up). The bot
+itself is C++20, as the judge builds it.
 
-# Export the trained policy to a submittable bot:
-python -m export.export_bot --checkpoint checkpoints/latest.pt --out bots/rl_bot_trained
+## Train, export, evaluate, submit
 
-# Try it against itself with the real engine:
-unswbc run bots/maps/arena.map bots/rl_bot_trained bots/rl_bot_trained --sandbox -v
+```bash
+# Train (CPU or CUDA; checkpoints are written atomically):
+python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0.3 \
+    --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
-# Submit it:
-unswbc auth set bc_...
-unswbc submit bots/rl_bot_trained -n rl-v1 -d "PPO self-play"
+# Export the actor as a C++ bot and run the export gate (native + judge sandbox):
+python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v2
+
+# Play it against the random starter on the official and generated maps, both sides:
+python -m export.evaluate --bot bots/rl_bot_v2 --generated 6
+
+# The toolkit's own commands work too:
+unswbc run maps/arena.map bots/rl_bot_v2 bots/rl_bot_v2 --sandbox -v
+unswbc submit bots/rl_bot_v2 -n rl-v2 -d "PPO self-play, C++ int8"
 ```
 
 ## How it works
 
-**`sim/engine.py`** is a from-scratch, single-game implementation of the
-rules (movement incl. the sprint free-steps/payment formula, pearl
-spawning incl. symmetric tile pairing, kelp, portals, wraparound,
-collisions and pearl-dropping on death, round loop, and the queen-length /
-longest-dragon / total-length tiebreak order), written directly off
-`docs/rules/*.md`. It does not shell out to the real `unswbc` engine --
-that talks to bot subprocesses over text, far too slow to drive millions
-of RL steps.
+**`engine/`** is `engine/` from
+[unswcpmsoc/battlecode](https://github.com/unswcpmsoc/battlecode) at the
+commit recorded in `engine/UPSTREAM.md`, vendored byte for byte and then
+patched: the three rule changes from 1.0.2 to 1.2.3 (sprints get ⌈L/4⌉ free
+steps; pearls come from a `std::mt19937_64` seeded with the 64-bit match
+seed; the queen decides round-limit tiebreaks first), Cap'n Proto made
+optional, a turn-at-a-time API, and speed (an occupancy grid, no events
+nobody listens to, pearl beds listed once). `UPSTREAM.md` lists every change.
+Seeded with the match seed, a game here is the judge's game, pearls and all.
 
-**`sim/obs.py`** turns the egocentric 7x7 vision window (the *same*
-information a real bot gets -- has_pearl, pearl countdown, the four edges,
-and team/head-or-body for any dragon part, per tile) plus a few scalars
-(own length, facing, team unit count, round number) into a flat 840-float
-vector. This boundary matters: whatever the policy uses in training is all
-it gets at competition time, nothing more.
+**`core/include/core/view.h`** is what a dragon knows on its turn, and a
+reader for the wire protocol. **`features.h`** computes everything else from a
+View only:
 
-**`sim/env.py`** wraps the engine in a multi-agent RL API: every living
-dragon (both teams) is an independent agent sharing one policy, since
-that's exactly how the real game works -- no inter-dragon shared memory,
-only sonar (not yet modeled, see Roadmap), and perfectly symmetric rules
-for both sides.
+- an egocentric observation of 1110 uint8 codes: 22 planes over the 7×7
+  window rotated so the dragon faces up (pearls, countdowns, kelp and
+  portals by relative side, own/ally/enemy heads and bodies with their
+  relative headings), then 32 scalars (length, free sprint steps, units,
+  round, queen, split legality, and per-move flags: visibly fatal, pearl,
+  enemy or ally head, out of sight);
+- 13 relative actions: one step forward/right/left, two steps (each
+  forward/right/left, free from length 5), and splitting off the rear half;
+- masks: level 0 only removes an illegal split; level 1 also removes moves
+  the dragon can see are certain death (kelp, bodies, through portals whose
+  far end is in sight, its own tail when it knows the tail moves on, a
+  second step it cannot pay for), falling back to level 0 if nothing is
+  left.
 
-**`rl/`** is a fairly standard self-play PPO: `policy.py` is a small
-MLP actor-critic (840 -> 256 -> 256 -> {4 action logits, 1 value}),
-`vector_env.py` runs many env copies in parallel (in-process or via
-`multiprocessing`), and `ppo.py`/`buffer.py` handle the bookkeeping that
-variable-length, asynchronously-dying agent trajectories need (GAE per
-agent, bootstrapped at rollout-length truncation, PPO clipped-surrogate
-updates on the pooled batch).
+The bot compiles these two headers unchanged. Training builds the View
+straight from the engine (**`state_view.h`**), and also gives the critic
+privileged team standings the actor never sees.
 
-**`export/`** turns a checkpoint into an `unswbc` bot project: weights
-are dumped as raw float32 blobs (not `.npz` -- parsing even an
-uncompressed zip through Python's `zipfile` burned enough CPU points in
-the judge's sandbox to make the first turn time out; raw `np.fromfile`
-doesn't), and `bot_template/main.py.tmpl` + `bot_template/bot_encoding.py`
-re-implement the observation encoding and the forward pass using only
-NumPy and the real `helper.py`, matching `sim/obs.py` feature-for-feature.
-A small safety net masks moves that would immediately hit kelp or a
-non-head body segment (a head-on-head "trade" is left unmasked -- that's
-sometimes the right play, so the policy has to learn it, not have it
-hidden).
+**`core/include/core/batch_env.h`** steps thousands of games across a thread
+pool. Every game slot always has one decision outstanding (the engine's own
+turn order, so every decision sees the board exactly as it is on that
+dragon's turn, and a split child is asked later in its birth round), and the
+next observations go straight into the trainer's tensors. A dragon's reward is
+its team's result (+1/−1/0, discounted to its last decision; a dead dragon
+waits for it) plus potential-based shaping on the queens' and teams' lengths,
+which telescopes to a constant. A level is a 64-bit seed naming the same
+generated (or official) map and match seed in any process, so levels can be
+replayed. `--max-rounds` below 500 cuts games with bootstrap observations.
 
-## Known limitations / roadmap
+**`rl/`** is PPO on that environment: rows complete when the environment
+says so, open rows carry into the next rollout, GAE runs along each dragon's
+own decisions. The actor is an MLP on the observation codes trained
+quantisation-aware (int8 weights, uint8 activations); the critic is separate
+and privileged. A share of game slots pit the learner against frozen
+snapshots (a league), and Prioritized Level Replay picks levels.
 
-This is a first attempt; these are the corners knowingly cut, roughly in
-the order they're worth fixing next:
+**`export/`** turns a checkpoint into a bot: `quantize.py` derives the
+integer actor (int8 weights, int32 accumulation, fixed-point requantisation),
+`bot/net.h` runs it with WASM SIMD in the judge, and `gate.py` requires the
+compiled bot to agree with training on every recorded turn, natively and in
+the judge's sandbox, reporting points, memory and zip size. `evaluate.py`
+plays it against the random starter (or any bot) in the sandbox.
 
-- **No splitting.** Dragons never split in the simulator or the exported
-  bot. Splitting mid-round creates new agents with fresh ids part-way
-  through a round, which complicates the vectorized rollout bookkeeping
-  enough that it was left out of v1.
-- **No sonar.** No inter-dragon communication is modeled or used.
-- **Portals use our own (self-consistent) convention**, not necessarily a
-  byte-exact replica of the judge's internal edge indexing -- see the
-  docstring in `sim/map.py`'s `portal_destination`. Direction-preserving
-  and double-sided either way, but worth re-deriving carefully (or
-  checking against real replays) before relying on portal-heavy maps.
-  Procedural training maps default to `portal_pairs=0` for this reason.
-- **No official `.map` file parsing.** Training maps are procedurally
-  generated (180-degree rotational symmetry only; `x`/`y` mirror symmetry
-  isn't implemented). This doesn't block using the real maps in
-  `bots/maps/` for local evaluation via `unswbc run` -- the exported bot
-  talks to the real engine directly and never touches our map code -- it
-  just means the policy hasn't specifically trained on them.
-  `tests/test_engine.py`'s scenarios are hand-built for the same reason.
-- **The sprint payment edge case** (exactly when a dragon "can't pay" and
-  dies, per `docs/rules/movement.md` / `execution-order.md`) is a
-  best-effort reading of possibly-ambiguous prose, and untested since v1's
-  RL action space only issues single-tile moves (sprinting is implemented
-  in the engine for completeness but unused by training).
-- **No real vectorized simulation.** Parallelism is either a plain Python
-  loop (`SerialVecEnv`) or one OS process per env (`SubprocVecEnv`);
-  rounds are simulated one dragon at a time in Python. A numpy-batched
-  engine (stepping all envs' dragons together) would likely be an order
-  of magnitude faster and is the best lever for training a stronger
-  policy without touching the RL algorithm.
-- **Policy is a plain MLP**, not a CNN, despite the observation being a
-  spatial 7x7 grid -- simpler to export as a hand-rolled NumPy forward
-  pass. A small conv stack would likely learn faster/generalize better
-  across map sizes and is a reasonable next step (conv2d-by-hand in NumPy
-  is more work than the two matmuls here, but not a lot more).
-- **Reward shaping is a simple, untuned default**
-  (`sim/env.py`'s `default_reward_config`): +1 per pearl eaten, a small
-  per-round survival bonus, a death penalty, and a terminal win/loss
-  bonus. No reward for e.g. protecting the queen specifically, which the
-  tiebreak rules make disproportionately important late in a game.
-- **No opponent pool / league play.** Training is naive self-play against
-  the current policy's own latest weights, which can cycle or
-  overspecialize; keeping a pool of past checkpoints to sample opponents
-  from is a standard, fairly cheap improvement.
+## Tests
+
+| test | what it holds |
+| --- | --- |
+| `test_fidelity.py` | our engine = the judge's engine, turn for turn, full seeded games |
+| `test_rules.py` | individual rules on hand-built boards; the occupancy grid; generated boards = their loaded text |
+| `test_core_contract.py` | training's View = the bot's View on every turn; masks are sound; rotation and decoding |
+| `test_env.py` | every decision saw its turn's board; children in their birth round; shaping telescopes; horizon cuts and bootstraps; threads don't change games |
+| `test_ppo.py` | rows complete once; vectorised GAE = a plain reference |
+| `test_quantize.py` | the integer actor = the QAT float actor |
+| `test_export.py` | the compiled bot = the integer actor (natively; sandbox with `RUN_SANDBOX_TESTS=1`) |
+
+## Limitations and next steps
+
+- **Sonar is unused.** The View carries messages and echoes, but the
+  observation and actions do not use them yet.
+- **The policy is an MLP.** A small convolutional or attention trunk over
+  the window would likely learn faster; the points budget leaves room for
+  a much bigger network (a turn uses about 4% of it).
+- **One split size** (the rear half) and two-step sprints at most.
+- **Settings chosen before measuring.** Mask level, the shaping scale and the
+  level distribution deserve a sweep now that training is fast; so does the
+  league and PLR configuration.
+- **CPU throughput.** The environment is memory-bound across many games
+  (~0.2–0.3M decisions per core); compacting the board (tiles and edges)
+  would help if a GPU makes the environment the bottleneck. A CUDA port
+  was not attempted.
+- **Evaluation.** `export/evaluate.py` reports wins, losses and errors; a
+  sequential test (SPRT) between bot versions is still to do.
 
 ## Rules reference
 
@@ -173,10 +185,4 @@ overview, structure, the game map, pearls, kelp and portals, vision,
 movement, splitting, sonar, death, the ELO/ladder system, the CLI, the
 wire protocol, execution order, timeouts (CPU-point budget and pricing),
 the sandboxed standard library, and the full helper API. Start at
-`docs/rules/overview.md` if you want the rules without reading engine
-code.
-
-The `unswbc` CLI itself (toolkit for building/running/submitting bots,
-bundled real maps, the replay viewer) is the other primary source this
-was built from -- run `unswbc help <command>` for anything not covered
-above.
+`docs/rules/overview.md`.
