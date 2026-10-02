@@ -1,0 +1,20 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "unswbc-rl"
+version = "0.2.0"
+description = "Self-play RL for UNSW Battlecode 2026: the C++ engine and core (module bccore)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26"]
+
+[tool.scikit-build]
+# Only the extension module is installed; the Python packages (rl/, export/)
+# run from the repository root.
+wheel.packages = []
+cmake.build-type = "Release"
+build-dir = "build/{wheel_tag}"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

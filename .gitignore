@@ -7,3 +7,6 @@ replays/
 *.replay
 .unswbc-build/
 bots/maps/
+build/
+_skbuild/
+*.so

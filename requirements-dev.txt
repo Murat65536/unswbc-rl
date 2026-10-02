@@ -1,0 +1,8 @@
+# Building the C++ core and running the tests.
+-r requirements.txt
+nanobind>=2.0
+scikit-build-core>=0.10
+pytest>=8
+# The judge's toolkit: its engine is what tests/test_fidelity.py compares
+# against (pinned by hash there), and it builds and runs bots in the sandbox.
+unswbc==1.2.3
