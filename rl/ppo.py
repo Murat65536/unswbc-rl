@@ -137,7 +137,6 @@ class Trainer:
         self.carry = Carry()
         self.iteration = 0
         self.decisions = 0
-        self.history = defaultdict(list)
 
     # -- levels ---------------------------------------------------------------
 
