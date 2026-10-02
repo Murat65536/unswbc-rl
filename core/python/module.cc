@@ -1,13 +1,18 @@
 // Python bindings for the C++ core (module `bccore`).
 
+#include "core/features.h"
 #include "core/mapgen.h"
+#include "core/state_view.h"
+#include "core/view.h"
 
+#include "engine/actions.h"
 #include "engine/game.h"
 #include "engine/helpers.h"
 #include "engine/protocol.h"
 #include "engine/scoring.h"
 
 #include <nanobind/nanobind.h>
+#include <nanobind/ndarray.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/pair.h>
 #include <nanobind/stl/string.h>
@@ -16,6 +21,7 @@
 
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -40,6 +46,92 @@ Symmetry SymmetryFrom(std::string const& name)
         return Symmetry::XY;
     }
     throw nb::value_error("symmetry must be 'x', 'y' or 'xy'");
+}
+
+template <typename T> nb::ndarray<nb::numpy, T> ToNumpy(std::vector<T> values)
+{
+    auto* owned = new std::vector<T>(std::move(values));
+    nb::capsule owner(owned, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+    return nb::ndarray<nb::numpy, T>(owned->data(), {owned->size()}, owner);
+}
+
+core::View ViewFromBlocks(std::string const& init, std::string const& round)
+{
+    core::BlockReader reader;
+    bool done = false;
+    std::istringstream lines(init + round);
+    std::string line;
+    while (std::getline(lines, line))
+    {
+        done = reader.Feed(line);
+    }
+    if (!done)
+    {
+        throw nb::value_error("the round block is incomplete");
+    }
+    return reader.Current();
+}
+
+/// (observation, level-0 mask, level-1 mask) for a View.
+nb::tuple Features(core::View const& view)
+{
+    std::vector<uint8_t> obs(core::kObsSize);
+    core::Encode(view, obs.data());
+    std::vector<uint8_t> mask0(core::kNumActions);
+    std::vector<uint8_t> mask1(core::kNumActions);
+    core::Mask(view, 0, mask0.data());
+    core::Mask(view, 1, mask1.data());
+    return nb::make_tuple(ToNumpy(std::move(obs)), ToNumpy(std::move(mask0)), ToNumpy(std::move(mask1)));
+}
+
+/// None if the two Views are equal, else where they first differ.
+std::optional<std::string> ViewDifference(core::View const& a, core::View const& b)
+{
+    if (a == b)
+    {
+        return std::nullopt;
+    }
+    std::ostringstream out;
+    auto const field = [&](char const* name, auto x, auto y) {
+        if (x != y && out.tellp() == 0)
+        {
+            out << name << ": " << +x << " != " << +y;
+        }
+    };
+    field("id", a.mId, b.mId);
+    field("team", a.mTeam, b.mTeam);
+    field("width", a.mWidth, b.mWidth);
+    field("height", a.mHeight, b.mHeight);
+    field("unit limit", a.mUnitLimit, b.mUnitLimit);
+    field("round", a.mRound, b.mRound);
+    field("facing", a.mFacing, b.mFacing);
+    field("length", a.mLength, b.mLength);
+    field("unit count", a.mUnitCount, b.mUnitCount);
+    field("messages", a.mMessages.size(), b.mMessages.size());
+    field("has echoes", a.mHasEchoes, b.mHasEchoes);
+    for (int i = 0; i < core::kTiles && out.tellp() == 0; i++)
+    {
+        core::TileView const& x = a.mTiles[i];
+        core::TileView const& y = b.mTiles[i];
+        if (x == y)
+        {
+            continue;
+        }
+        out << "tile " << i << " (" << x.mX << "," << x.mY << ") vs (" << y.mX << "," << y.mY << "): pearl " << x.mPearl
+            << "/" << y.mPearl << " in " << x.mPearlIn << "/" << y.mPearlIn << " part " << x.mPart.mId << "/"
+            << y.mPart.mId << " dir " << +x.mPart.mDir << "/" << +y.mPart.mDir << " head " << x.mPart.mHead << "/"
+            << y.mPart.mHead << " edges";
+        for (int side = 0; side < 4; side++)
+        {
+            out << " " << +x.mEdges[side].mKind << ":" << x.mEdges[side].mPortal << "/" << +y.mEdges[side].mKind << ":"
+                << y.mEdges[side].mPortal;
+        }
+    }
+    if (out.tellp() == 0)
+    {
+        out << "messages or echoes differ";
+    }
+    return out.str();
 }
 
 nb::dict ResultDict(GameResult const& result, int rounds)
@@ -221,6 +313,43 @@ class Match
         return mGame->State();
     }
 
+    core::View ViewOf(int id) const
+    {
+        core::View view;
+        core::ViewFromState(mGame->State(), Find(id), view);
+        return view;
+    }
+
+    /// Whether the current dragon would die this turn taking `action`: the
+    /// action is decoded from its View and played on a copy of the board.
+    bool Probe(int action) const
+    {
+        std::optional<DragonId> const id = mGame->CurrentDragon();
+        if (!id || action < 0 || action >= core::kNumActions)
+        {
+            throw nb::value_error("no current dragon, or no such action");
+        }
+        GameState copy = mGame->State();
+        Dragon& dragon = copy.mDragons[*id];
+        core::View view;
+        core::ViewFromState(copy, dragon, view);
+        core::Command const command = core::Decode(view, action);
+        if (command.mSplit)
+        {
+            Split(copy, dragon, command.mSplitSize, {});
+        }
+        else
+        {
+            std::vector<Direction> steps;
+            for (int i = 0; i < command.mSteps; i++)
+            {
+                steps.push_back(static_cast<Direction>(core::kDirChars[command.mDirs[i]]));
+            }
+            Move(copy, dragon, steps, {});
+        }
+        return !copy.mDragons[*id].mAlive;
+    }
+
     /// Raises unless the occupancy grid holds exactly the living bodies.
     void CheckInvariants() const
     {
@@ -310,6 +439,38 @@ NB_MODULE(bccore, m)
         "gap_spread"_a = 60, "unit_limit"_a = DEFAULT_UNIT_LIMIT,
         "A symmetric .map text, the same for the same arguments on every platform.");
 
+    m.attr("OBS_SIZE") = core::kObsSize;
+    m.attr("NUM_PLANES") = core::kPlanes;
+    m.attr("NUM_SCALARS") = core::kScalars;
+    m.attr("NUM_ACTIONS") = core::kNumActions;
+    m.attr("NUM_PRIVILEGED") = core::kPrivileged;
+    m.def(
+        "feature_scales",
+        [] {
+            std::vector<float> scales(core::kObsSize);
+            for (int i = 0; i < core::kObsSize; i++)
+            {
+                scales[i] = core::FeatureScale(i);
+            }
+            return ToNumpy(std::move(scales));
+        },
+        "Feature i of an observation means code * feature_scales()[i].");
+    m.def(
+        "features_from_blocks",
+        [](std::string const& init, std::string const& round) { return Features(ViewFromBlocks(init, round)); },
+        "init"_a, "round_block"_a,
+        "(observation, level-0 mask, level-1 mask) from the protocol text, as the bot computes them.");
+    m.def(
+        "decode_action",
+        [](std::string const& init, std::string const& round, int action) {
+            if (action < 0 || action >= core::kNumActions)
+            {
+                throw nb::value_error("no such action");
+            }
+            return core::FormatCommand(core::Decode(ViewFromBlocks(init, round), action));
+        },
+        "init"_a, "round_block"_a, "action"_a, "The reply line an action makes, e.g. 'MOVE NE'.");
+
     nb::class_<Match>(m, "Match")
         .def(nb::init<std::string const&, uint64_t, bool>(), "map_text"_a, "seed"_a = 0, "record"_a = false)
         .def("run", &Match::Run, "reply"_a, "spawn"_a = nb::none(), "death"_a = nb::none(),
@@ -328,6 +489,16 @@ NB_MODULE(bccore, m)
         .def("tiles", &Match::Tiles)
         .def("set_pearl", &Match::SetPearl, "x"_a, "y"_a, "present"_a = true)
         .def("check_invariants", &Match::CheckInvariants)
+        .def("probe", &Match::Probe, "action"_a,
+             "Whether the current dragon would die this turn taking this action (played on a copy).")
+        .def("features", [](Match const& self, int id) { return Features(self.ViewOf(id)); }, "id"_a,
+             "(observation, level-0 mask, level-1 mask) from the engine's state, as training computes them.")
+        .def(
+            "view_difference",
+            [](Match const& self, int id) {
+                return ViewDifference(self.ViewOf(id), ViewFromBlocks(self.InitBlock(id), self.RoundBlock(id)));
+            },
+            "id"_a, "None if the View built from the state equals the one parsed from the init and round blocks.")
         .def_prop_ro("round", [](Match const& self) { return self.State().mRound; })
         .def_prop_ro("width", [](Match const& self) { return self.State().mWidth; })
         .def_prop_ro("height", [](Match const& self) { return self.State().mHeight; })
