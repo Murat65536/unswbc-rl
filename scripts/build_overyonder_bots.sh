@@ -33,7 +33,7 @@ if [ ! -d the-loong-game ]; then
 fi
 examples=the-loong-game/examples
 
-[ -d starter-c ] || unswbc init c starter-c >/dev/null
+[ -d starter-c ] || unswbc init c starter-c >/dev/null 2>&1
 rm -rf repertoire
 cp -r "$examples/repertoire" repertoire
 nimbase="$(nim dump 2>&1 | grep -m1 '/lib$')/nimbase.h"
