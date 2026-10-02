@@ -129,19 +129,26 @@ Seeded with the match seed, a game here is the judge's game, pearls and all.
 
 **`core/include/core/view.h`** is what a dragon knows on its turn, and a
 reader for the wire protocol. **`features.h`** computes everything else from a
-View only:
+View and the dragon's **memory**: each dragon is a process of its own for as
+long as it lives, so it remembers its own body in board coordinates (what it
+sees of it back from its head, then what it remembered from there on). A body
+trails its head's path, so after L moves it knows all of it, far outside its
+window. From those:
 
-- an egocentric observation of 1227 uint8 codes: 24 planes over the 7×7
+- an egocentric observation of 1231 uint8 codes: 24 planes over the 7×7
   window rotated so the dragon faces up (pearls, countdowns, kelp and
   portals by relative side, own/ally/enemy heads and bodies with their
   relative headings, and the segments of this team's queen and of the
-  enemy queen), then 51 scalars (length, free sprint steps, units, round,
+  enemy queen), then 55 scalars (length, free sprint steps, units, round,
   queen, split legality, per-move flags: visibly fatal, pearl, enemy or
   ally head, out of sight; past each first step, how many tiles are
   reachable within the window and whether that region goes on out of
-  sight, so pockets that would trap the dragon show up; and, for where
-  each move ends and for the head's tile now, whether a visible enemy head
-  could reach it before this dragon moves again);
+  sight, so pockets that would trap the dragon show up; for where each move
+  ends and for the head's tile now, whether a visible enemy head could
+  reach it before this dragon moves again; and, after each single step, how
+  many moves it can be sure of surviving: a depth-first search over its
+  own future steps, up to its length plus 2 (8 to 24), with other dragons
+  frozen and its own body, known from memory, freeing as its tail moves);
 - 13 relative actions: one step forward/right/left, two steps (each
   forward/right/left, free from length 5), and splitting off the rear half;
 - masks: level 0 only removes an illegal split; level 1 also removes moves
@@ -149,14 +156,16 @@ View only:
   far end is in sight, its own tail when it knows the tail moves on, a
   second step it cannot pay for, an ally's head); level 2, the default,
   also shields the queen, which decides the first round-limit tiebreak: it
-  never moves onto a head, keeps to open water (regions that go on out of
-  sight, not closed ones, which trap it sooner or later) and out of one
-  step's reach of enemy heads while it has a move that does, and splits
-  only when it has no move left. Each level falls back to the
-  one below if it would leave nothing, and a dragon with only fatal moves
-  still avoids taking an ally with it.
+  never moves onto a head; of its other moves it keeps those it can be sure
+  of surviving its horizon after, out of one step's reach of enemy heads if
+  it can, else those that last longest (a move through a portal whose far
+  end it cannot see counts as lasting one move); and it splits only when it
+  has no move left. Every other dragon keeps out of its queen's way: it
+  does not end a move beside the queen's head while it has another move.
+  Each level falls back to the one below if it would leave nothing, and a
+  dragon with only fatal moves still avoids taking an ally with it.
 
-The bot compiles these two headers unchanged. Training builds the View
+The bot compiles these two headers unchanged, and keeps one memory. Training builds the View
 straight from the engine (**`state_view.h`**), and also gives the critic
 privileged team standings the actor never sees.
 
@@ -202,7 +211,7 @@ each game, and with `--sprt` runs a sequential test between two versions.
 | --- | --- |
 | `test_fidelity.py` | our engine = the judge's engine, turn for turn, full seeded games |
 | `test_rules.py` | individual rules on hand-built boards; the occupancy grid; generated boards = their loaded text |
-| `test_core_contract.py` | training's View = the bot's View on every turn; masks are sound (level 2: only the queen's rules); rotation, decoding, queen planes, enemy reach |
+| `test_core_contract.py` | training's View = the bot's View, and a dragon's memory and features fed either way agree, on every turn; the remembered body is never wrong; masks are sound (level 2 only narrows); rotation, decoding, queen planes, enemy reach, survival, giving way |
 | `test_env.py` | every decision saw its turn's board; children in their birth round; shaping telescopes; horizon cuts and bootstraps; threads don't change games; queen deaths, splits and deciders are reported |
 | `test_ppo.py` | rows complete once; vectorised GAE = a plain reference |
 | `test_warm_start.py` | an actor or critic widened to a newer observation computes what it did before |
@@ -213,14 +222,18 @@ each game, and with `--sprt` runs a sequential test between two versions.
 
 - **Sonar is unused.** The View carries messages and echoes, but the
   observation and actions do not use them yet.
-- **The queen still gets cornered.** With the level-2 shield the queen no
-  longer trades heads, splits by choice or is rammed by its allies, but it
-  still dies when no move it can see survives: a long queen in its own
-  coil, a short one in a dead-end corridor, or one boxed in by allies. A
-  7×7 window shows little of a long body; sonar, or allies keeping clear
-  of the queen, may help. (On autarky, dilemma and slithery_fight each
-  queen starts at the mouth of a dead-end corridor and is lost by round 5
-  whatever it does.)
+- **The queen still gets cornered sometimes.** Memory, the survival search
+  and allies giving way cut it from 42% of games against the careful player
+  to about 20% (with v3's weights). What is left is mostly crowds: enemy and
+  allied bodies closing in between the queen's turns, which a search with
+  everyone else frozen cannot foresee. The memory keeps only the body; a
+  remembered map (kelp, portals, pearls) and sonar between allies are the
+  next steps. (On autarky, dilemma and slithery_fight each queen starts at
+  the mouth of a dead-end corridor and is lost by round 5 whatever it does.)
+- **The queen is never fed.** A dead dragon leaves half its length as
+  pearls, and over|yonder found top teams feeding their champion that way;
+  our bot has no action for it yet (no deliberate death, and moving onto
+  an ally's body is masked).
 - **The longest-dragon tiebreak.** When both queens die, the bot's habit
   of splitting into many short dragons loses the second tiebreak to
   opponents that keep one long dragon (most of v3's losses to the careful
@@ -236,6 +249,15 @@ each game, and with `--sprt` runs a sequential test between two versions.
   (~0.2–0.3M decisions per core); compacting the board (tiles and edges)
   would help if a GPU makes the environment the bottleneck. A CUDA port
   was not attempted.
+
+## Sparring with over|yonder's bots
+
+`scripts/build_overyonder_bots.sh` builds the example bots from
+[over|yonder's Loong Game repository](https://github.com/overyonder/the-loong-game),
+whose [blog](https://github.com/overyonder/the-loong-game/tree/master/blog)
+much of this design draws on: tactics-bot, roles-bot and first-bot (Nim,
+written out as C) and room-c. Pass one as `--opponent` to `export.evaluate`.
+They were written for the rules before Slay the Queen.
 
 ## Rules reference
 
