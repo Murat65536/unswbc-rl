@@ -239,3 +239,14 @@ def test_level_one_knows_the_tail_moves_on(pearl):
     assert m.probe(forward_then_left) == pearl
     assert mask1[forward_then_left] == (0 if pearl else 1)
     assert mask1[2] == 0 and m.probe(2)  # a single step left is into the body
+
+
+def test_reach_sees_a_pocket():
+    # Facing east at (8, 8); the tile ahead, (9, 8), is closed by kelp on its
+    # north, east and south sides: stepping forward is safe now but a trap.
+    m = solo([(8, 8), (7, 8), (6, 8)], kelp=[("N", 9, 8), ("W", 10, 8), ("N", 9, 9)])
+    obs, _, mask1 = m.features(0)
+    assert mask1[0] == 1                                   # the step itself is not fatal
+    assert scalar(obs, 32) == 1 and scalar(obs, 35) == 0   # forward: one tile, going nowhere
+    assert scalar(obs, 33) > 20 and scalar(obs, 36) == 1   # right: open water, out of sight
+    assert scalar(obs, 34) > 20 and scalar(obs, 37) == 1

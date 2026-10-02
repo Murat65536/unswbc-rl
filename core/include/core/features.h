@@ -323,6 +323,58 @@ inline MoveSight LookAhead(View const& view)
     return sight;
 }
 
+/// What lies past window tile `start` (where a first step would land),
+/// explored by plain steps through open edges onto tiles with no dragon on
+/// them, within the window: how many tiles (start included), and whether
+/// the region goes on out of sight (an open edge leaving the window, or a
+/// portal). A small count that goes nowhere is a pocket the dragon would
+/// trap itself in.
+struct Region
+{
+    int mTiles = 0;
+    bool mOpen = false;
+};
+
+inline Region Explore(View const& view, int start)
+{
+    Region region;
+    if (start < 0 || view.mTiles[start].mPart.mId >= 0)
+    {
+        return region;
+    }
+    std::array<bool, kTiles> seen{};
+    std::array<uint8_t, kTiles> queue{};
+    int head = 0;
+    int tail = 0;
+    seen[start] = true;
+    queue[tail++] = static_cast<uint8_t>(start);
+    while (head < tail)
+    {
+        int const tile = queue[head++];
+        for (int side = 0; side < 4; side++)
+        {
+            EdgeView const& edge = view.mTiles[tile].mEdges[side];
+            if (edge.mKind == kKelp)
+            {
+                continue;
+            }
+            int const next = edge.mKind == kOpen ? NeighbourInWindow(tile, side) : -1;
+            if (next < 0)
+            {
+                region.mOpen = true; // out of the window, or through a portal
+                continue;
+            }
+            if (!seen[next] && view.mTiles[next].mPart.mId < 0)
+            {
+                seen[next] = true;
+                queue[tail++] = static_cast<uint8_t>(next);
+            }
+        }
+    }
+    region.mTiles = tail;
+    return region;
+}
+
 inline bool SplitLegal(View const& view)
 {
     return view.mLength >= 4 && view.mUnitCount < view.mUnitLimit;
@@ -382,10 +434,12 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 //   19..21  one step F/R/L lands out of sight
 //   22..30  two-step move 3..11 is visibly fatal
 //   31  two-step moves are free (L >= 5)
+//   32..34  tiles reachable past one step F/R/L within the window, min(48) / 48
+//   35..37  and whether that region goes on out of sight (see Explore)
 
 constexpr int kPlanes = 22;
 constexpr int kPlaneSize = kPlanes * kTiles;
-constexpr int kScalars = 32;
+constexpr int kScalars = 38;
 constexpr int kObsSize = kPlaneSize + kScalars;
 
 constexpr int kPlanePearl = 0;
@@ -439,6 +493,10 @@ inline float FeatureScale(int feature)
     case 2:
     case 3:
         return 1.0f / 64.0f;
+    case 32:
+    case 33:
+    case 34:
+        return 1.0f / 48.0f;
     case 1:
         return 1.0f / 4.0f;
     case 4:
@@ -528,6 +586,12 @@ inline void Encode(View const& view, MoveSight const& sight, uint8_t* out)
         scalars[22 + a - kSingleSteps] = sight.mVisiblyFatal[a];
     }
     scalars[31] = free >= 2;
+    for (int i = 0; i < kSingleSteps; i++)
+    {
+        Region const region = Explore(view, sight.mTarget[i]);
+        scalars[32 + i] = static_cast<uint8_t>(region.mTiles < 48 ? region.mTiles : 48);
+        scalars[35 + i] = region.mOpen;
+    }
 }
 
 inline void Encode(View const& view, uint8_t* out)
