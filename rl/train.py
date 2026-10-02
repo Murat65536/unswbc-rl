@@ -1,160 +1,138 @@
-"""Self-play PPO training entrypoint.
+"""Self-play PPO on the C++ environment.
 
-Example (local smoke test, tiny and fast):
-    python -m rl.train --num-envs 8 --team-size 2 --width 14 --height 14 \
-        --max-rounds 150 --iterations 20 --rollout-length 64
+    python -m rl.train --games 1024 --rollout 64 --iterations 2000 \\
+        --checkpoint-dir checkpoints --log-csv checkpoints/log.csv
 
-On Colab, point --checkpoint-dir at a Google Drive path so checkpoints
-survive runtime restarts; see notebooks/train_colab.ipynb.
+Every living dragon on both teams, in every game, is an agent of one shared
+actor (the same program runs every dragon in the real game too). The critic
+is privileged and training-only. See rl/ppo.py for how rollouts, rows and
+completions fit together, and core/batch_env.h for the environment.
 """
 from __future__ import annotations
 
 import argparse
 import csv
 import os
+import pathlib
 import time
 
 import numpy as np
 import torch
 
-from sim.env import BattlecodeMultiAgentEnv
-from .policy import ActorCritic
-from .ppo import PPOTrainer
-from .vector_env import SerialVecEnv, SubprocVecEnv
+from .ppo import Trainer
 
 
-def make_env_fn(args):
-    def _fn():
-        return BattlecodeMultiAgentEnv(
-            width=args.width,
-            height=args.height,
-            team_size=args.team_size,
-            max_rounds=args.max_rounds,
-            kelp_prob=args.kelp_prob,
-            portal_pairs=args.portal_pairs,
-        )
-    return _fn
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    env = p.add_argument_group("environment")
+    env.add_argument("--games", type=int, default=1024, help="game slots stepped together")
+    env.add_argument("--threads", type=int, default=0, help="environment threads (0: one per core)")
+    env.add_argument("--mask-level", type=int, default=1, choices=(0, 1))
+    env.add_argument("--max-rounds", type=int, default=500, help="training horizon (500 plays every game out)")
+    env.add_argument("--shaping", type=float, default=0.5, help="scale of the potential-based shaping")
+    env.add_argument("--queen-weight", type=float, default=0.5)
+    env.add_argument("--width", type=int, nargs=2, default=(16, 40))
+    env.add_argument("--height", type=int, nargs=2, default=(16, 40))
+    env.add_argument("--dragons-per-team", type=int, nargs=2, default=(1, 4))
+    env.add_argument("--kelp", type=float, nargs=2, default=(0.0, 0.12))
+    env.add_argument("--portal-pairs", type=int, nargs=2, default=(0, 4))
+    env.add_argument("--official-maps", type=float, default=0.0,
+                     help="probability a level is one of the 15 official maps (needs unswbc installed)")
+
+    ppo = p.add_argument_group("PPO")
+    ppo.add_argument("--iterations", type=int, default=1000)
+    ppo.add_argument("--rollout", type=int, default=64, help="environment steps per iteration")
+    ppo.add_argument("--epochs", type=int, default=3)
+    ppo.add_argument("--minibatch", type=int, default=8192)
+    ppo.add_argument("--lr", type=float, default=3e-4)
+    ppo.add_argument("--gamma", type=float, default=0.995)
+    ppo.add_argument("--gae-lambda", type=float, default=0.95)
+    ppo.add_argument("--clip", type=float, default=0.2)
+    ppo.add_argument("--value-clip", type=float, default=10.0)
+    ppo.add_argument("--ent-coef", type=float, default=0.01)
+    ppo.add_argument("--vf-coef", type=float, default=0.5)
+    ppo.add_argument("--max-grad-norm", type=float, default=0.5)
+    ppo.add_argument("--hidden", type=int, nargs="+", default=(256, 256), help="actor hidden sizes")
+    ppo.add_argument("--critic-hidden", type=int, nargs="+", default=(256, 256))
+    ppo.add_argument("--qat-after", type=int, default=0,
+                     help="train quantisation-aware from this iteration on (-1: never)")
+
+    league = p.add_argument_group("league and level replay")
+    league.add_argument("--league-frac", type=float, default=0.25,
+                        help="share of game slots where the learner plays a frozen earlier snapshot")
+    league.add_argument("--league-size", type=int, default=10)
+    league.add_argument("--snapshot-every", type=int, default=25)
+    league.add_argument("--opponent-every", type=int, default=5)
+    league.add_argument("--plr-replay", type=float, default=0.5, help="chance a new level is a replayed one (0: off)")
+    league.add_argument("--plr-capacity", type=int, default=4000)
+    league.add_argument("--plr-temperature", type=float, default=0.3)
+    league.add_argument("--plr-staleness", type=float, default=0.1)
+
+    run = p.add_argument_group("run")
+    run.add_argument("--seed", type=int, default=0)
+    run.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    run.add_argument("--torch-threads", type=int, default=0)
+    run.add_argument("--checkpoint-dir", default="checkpoints")
+    run.add_argument("--checkpoint-every", type=int, default=20)
+    run.add_argument("--resume", default=None, help="a checkpoint to continue from")
+    run.add_argument("--log-csv", default=None)
+    return p.parse_args(argv)
 
 
-def parse_args():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--num-envs", type=int, default=16)
-    p.add_argument("--subproc", action="store_true", help="run envs in separate processes")
-    p.add_argument("--width", type=int, default=16)
-    p.add_argument("--height", type=int, default=16)
-    p.add_argument("--team-size", type=int, default=2)
-    p.add_argument("--max-rounds", type=int, default=250)
-    p.add_argument("--kelp-prob", type=float, default=0.04)
-    p.add_argument("--portal-pairs", type=int, default=0)
-
-    p.add_argument("--iterations", type=int, default=1000)
-    p.add_argument("--rollout-length", type=int, default=128)
-    p.add_argument("--epochs", type=int, default=4)
-    p.add_argument("--minibatch-size", type=int, default=4096)
-    p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--gamma", type=float, default=0.99)
-    p.add_argument("--gae-lambda", type=float, default=0.95)
-    p.add_argument("--clip", type=float, default=0.2)
-    p.add_argument("--ent-coef", type=float, default=0.01)
-    p.add_argument("--vf-coef", type=float, default=0.5)
-    p.add_argument("--hidden", type=int, default=256)
-
-    p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--checkpoint-dir", type=str, default="checkpoints")
-    p.add_argument("--checkpoint-every", type=int, default=20)
-    p.add_argument("--resume", type=str, default=None, help="path to a checkpoint .pt to resume from")
-    p.add_argument("--log-csv", type=str, default=None)
-    return p.parse_args()
+def save_atomic(state: dict, path: pathlib.Path):
+    """Write to a temporary file and rename over the target, so a crash
+    mid-write never leaves a truncated checkpoint behind."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)
 
 
-def main():
-    args = parse_args()
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    os.makedirs(args.checkpoint_dir, exist_ok=True)
+def main(argv=None):
+    args = parse_args(argv)
+    if args.torch_threads:
+        torch.set_num_threads(args.torch_threads)
+    out_dir = pathlib.Path(args.checkpoint_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    vec_cls = SubprocVecEnv if args.subproc else SerialVecEnv
-    vec_env = vec_cls([make_env_fn(args) for _ in range(args.num_envs)])
-
-    policy = ActorCritic(hidden=args.hidden)
-    start_iter = 0
+    trainer = Trainer(args, device=args.device)
     if args.resume:
-        ckpt = torch.load(args.resume, map_location="cpu")
-        policy.load_state_dict(ckpt["model"])
-        start_iter = ckpt.get("iteration", 0)
-        print(f"resumed from {args.resume} at iteration {start_iter}")
+        trainer.load_state_dict(torch.load(args.resume, map_location="cpu", weights_only=False))
+        print(f"resumed from {args.resume} at iteration {trainer.iteration}")
 
-    trainer = PPOTrainer(
-        vec_env, policy, device=args.device, gamma=args.gamma, gae_lambda=args.gae_lambda,
-        lr=args.lr, clip=args.clip, vf_coef=args.vf_coef, ent_coef=args.ent_coef,
-        epochs=args.epochs, minibatch_size=args.minibatch_size, seed=args.seed,
-    )
-    if args.resume:
-        trainer.optimizer.load_state_dict(ckpt["optimizer"])
-
-    csv_writer = None
-    csv_file = None
+    writer = None
+    log_file = None
+    columns = ["iteration", "decisions", "trained_rows", "episodes", "mean_rounds", "mean_total_length", "draw_rate",
+               "league_win_rate", "policy_loss", "value_loss", "entropy", "approx_kl", "clip_frac",
+               "decisions_per_second", "env_seconds", "seconds", "carried", "plr_levels"]
     if args.log_csv:
-        new_file = not os.path.exists(args.log_csv)
-        csv_file = open(args.log_csv, "a", newline="")
-        csv_writer = csv.writer(csv_file)
-        if new_file:
-            csv_writer.writerow([
-                "iteration", "total_steps", "mean_episode_reward", "mean_episode_length",
-                "mean_final_length", "win_rate_a", "win_rate_b", "draw_rate",
-                "policy_loss", "value_loss", "entropy", "seconds",
-            ])
+        new = not os.path.exists(args.log_csv)
+        log_file = open(args.log_csv, "a", newline="")
+        writer = csv.DictWriter(log_file, fieldnames=columns, extrasaction="ignore")
+        if new:
+            writer.writeheader()
 
-    for it in range(start_iter, args.iterations):
-        t0 = time.time()
-        trajectories, rollout_stats = trainer.collect_rollout(args.rollout_length)
-        update_stats = trainer.update(trajectories)
-        dt = time.time() - t0
-
-        winners = rollout_stats.get("game_winner", [])
-        n = max(len(winners), 1)
-        win_a = winners.count("A") / n
-        win_b = winners.count("B") / n
-        draw = winners.count("draw") / n
-        mean_reward = float(np.mean(rollout_stats.get("episode_reward", [0.0])))
-        mean_len = float(np.mean(rollout_stats.get("episode_length", [0.0])))
-        mean_final_len = float(np.mean(rollout_stats.get("final_dragon_length", [0.0])))
-        pol_loss = float(np.mean(update_stats["policy_loss"]))
-        val_loss = float(np.mean(update_stats["value_loss"]))
-        entropy = float(np.mean(update_stats["entropy"]))
-
-        print(
-            f"iter {it:5d} | steps {trainer.total_steps:9d} | "
-            f"games {len(winners):3d} (A {win_a:.2f} B {win_b:.2f} draw {draw:.2f}) | "
-            f"R {mean_reward:+6.2f} | len {mean_len:6.1f} | final_len {mean_final_len:5.2f} | "
-            f"pLoss {pol_loss:+.4f} vLoss {val_loss:.4f} H {entropy:.3f} | {dt:.1f}s"
-        )
-        if csv_writer:
-            csv_writer.writerow([it, trainer.total_steps, mean_reward, mean_len, mean_final_len,
-                                  win_a, win_b, draw, pol_loss, val_loss, entropy, dt])
-            csv_file.flush()
-
-        if (it + 1) % args.checkpoint_every == 0 or it == args.iterations - 1:
-            path = os.path.join(args.checkpoint_dir, f"ckpt_{it + 1:06d}.pt")
-            torch.save({
-                "model": policy.state_dict(),
-                "optimizer": trainer.optimizer.state_dict(),
-                "iteration": it + 1,
-                "args": vars(args),
-            }, path)
-            latest = os.path.join(args.checkpoint_dir, "latest.pt")
-            torch.save({
-                "model": policy.state_dict(),
-                "optimizer": trainer.optimizer.state_dict(),
-                "iteration": it + 1,
-                "args": vars(args),
-            }, latest)
-            print(f"  saved checkpoint -> {path}")
-
-    vec_env.close()
-    if csv_file:
-        csv_file.close()
+    start = time.time()
+    while trainer.iteration < args.iterations:
+        stats = trainer.iterate()
+        line = (f"iter {stats['iteration']:5d} | dec {stats['decisions']:11,d} | "
+                f"{stats['decisions_per_second'] / 1e3:6.1f}k dec/s (env {stats['env_seconds']:.1f}s of "
+                f"{stats['seconds']:.1f}s) | games {stats['episodes']:4d} rounds {stats.get('mean_rounds', 0):5.1f} "
+                f"len {stats.get('mean_total_length', 0):5.1f}")
+        if "league_win_rate" in stats:
+            line += f" | league win {stats['league_win_rate']:.2f} ({stats['league_games']})"
+        if "entropy" in stats:
+            line += f" | H {stats['entropy']:.3f} kl {stats['approx_kl']:.4f} vL {stats['value_loss']:.4f}"
+        print(line, flush=True)
+        if writer:
+            writer.writerow({k: stats.get(k, "") for k in columns})
+            log_file.flush()
+        if trainer.iteration % args.checkpoint_every == 0 or trainer.iteration == args.iterations:
+            state = trainer.state_dict()
+            save_atomic(state, out_dir / f"ckpt_{trainer.iteration:06d}.pt")
+            save_atomic(state, out_dir / "latest.pt")
+    if log_file:
+        log_file.close()
+    print(f"done in {(time.time() - start) / 60:.1f} min")
 
 
 if __name__ == "__main__":
