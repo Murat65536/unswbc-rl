@@ -1,9 +1,12 @@
 #include "engine/pearls.h"
 #include "engine/helpers.h"
 
-static int DrawRespawnGap(Tile const& tile, std::mt19937& rng)
+// 1.2.3 draws from the 64-bit generator and reduces modulo the span in 64
+// bits (not with std::uniform_int_distribution), so any conforming
+// std::mt19937_64 reproduces the judge's pearls exactly.
+static int DrawRespawnGap(Tile const& tile, PearlRng& rng)
 {
-    auto const span = static_cast<uint32_t>(tile.mMaxRespawnGap - tile.mMinRespawnGap + 1);
+    auto const span = static_cast<uint64_t>(static_cast<uint32_t>(tile.mMaxRespawnGap - tile.mMinRespawnGap + 1));
     return tile.mMinRespawnGap + static_cast<int>(rng() % span);
 }
 
@@ -35,7 +38,7 @@ static void TrySpawnPearl(GameState& state, Point bed, EventSink const& emit)
     emit(EventTileChange{bed, true});
 }
 
-void InitPearlCountdowns(GameState& state, std::mt19937& rng, EventSink const& emit)
+void InitPearlCountdowns(GameState& state, PearlRng& rng, EventSink const& emit)
 {
     for (int y = 0; y < state.mHeight; y++)
     {
@@ -58,7 +61,7 @@ void InitPearlCountdowns(GameState& state, std::mt19937& rng, EventSink const& e
     }
 }
 
-void PearlTick(GameState& state, std::mt19937& rng, EventSink const& emit)
+void PearlTick(GameState& state, PearlRng& rng, EventSink const& emit)
 {
     for (int y = 0; y < state.mHeight; y++)
     {

@@ -43,11 +43,14 @@ std::optional<std::pair<DragonId, size_t>> OutputOf(Event const& event)
 
 } // namespace
 
-Game::Game(GameState state, DebugOutput keep) : mState(std::move(state)), mKeep(keep)
+Game::Game(GameState state, uint64_t seed, DebugOutput keep) : mState(std::move(state)), mKeep(keep), mRng(seed)
 {
     mEmit = [this, spent = std::array<TeamOutput, 2>{}](Event const& event) mutable {
         auto const record = [this](Event const& e) {
-            mEvents.push_back(e);
+            if (mKeep.mRecord)
+            {
+                mEvents.push_back(e);
+            }
             if (mSink)
             {
                 mSink(e);
@@ -109,33 +112,106 @@ GameResult Game::Run(std::function<bool()> const& stop)
         mControllers[dragon.mId] = mSpawnController(dragon);
     }
 
+    mStop = stop ? &stop : nullptr;
+    Begin();
+    while (std::optional<DragonId> const id = CurrentDragon())
+    {
+        TakeTurn(*id);
+        mTurnIndex++;
+        SettleCursor();
+    }
+    mStop = nullptr;
+    return mResult;
+}
+
+void Game::Begin()
+{
+    RUNTIME_ASSERT(!mBegun, "the game has already begun");
+    mBegun = true;
     InitPearlCountdowns(mState, mRng, mEmit);
     for (Dragon const& dragon : mState.mDragons)
     {
         mEmit(EventDragonUpdate{dragon.mId, dragon.mFacing, dragon.mBody.front(), dragon.mBody.back()});
     }
 
-    for (mState.mRound = 0; mState.mRound < MAX_ROUNDS; mState.mRound++)
-    {
-        mEmit(EventRoundStart{mState.mRound});
-        PearlTick(mState, mRng, mEmit);
+    mState.mRound = 0;
+    StartRound();
+    SettleCursor();
+}
 
-        for (size_t i = 0; i < mState.mDragons.size(); i++)
+void Game::StartRound()
+{
+    mEmit(EventRoundStart{mState.mRound});
+    PearlTick(mState, mRng, mEmit);
+    mTurnIndex = 0;
+}
+
+void Game::SettleCursor()
+{
+    while (true)
+    {
+        // A child born by a split this round was appended, so it takes its
+        // turn later this round.
+        while (mTurnIndex < mState.mDragons.size() && !mState.mDragons[mTurnIndex].mAlive)
         {
-            TakeTurn(mState.mDragons[i].mId);
+            mTurnIndex++;
+        }
+        if (mTurnIndex < mState.mDragons.size())
+        {
+            return;
         }
 
         mResult = ResultAfterRound(mState);
-        if (!mResult.mTerminated && stop && stop())
+        if (!mResult.mTerminated && mStop && *mStop && (*mStop)())
         {
             mResult = ResultAfterRound(mState, true);
         }
-        if (mResult.mTerminated)
+        if (mResult.mTerminated || mState.mRound + 1 >= MAX_ROUNDS)
         {
-            break;
+            mOver = true;
+            return;
         }
+        mState.mRound++;
+        StartRound();
     }
+}
+
+std::optional<DragonId> Game::CurrentDragon() const
+{
+    if (!mBegun || mOver)
+    {
+        return std::nullopt;
+    }
+    return mState.mDragons[mTurnIndex].mId;
+}
+
+void Game::TakeTurnWith(ControllerReply const& reply)
+{
+    std::optional<DragonId> const id = CurrentDragon();
+    RUNTIME_ASSERT(id, "no dragon is waiting to take a turn");
+    StartTurn(*DragonById(mState, *id));
+    mTurnInstructions.reset();
+    mTurnTle = false;
+    FinishTurn(*id, reply);
+    mTurnIndex++;
+    SettleCursor();
+}
+
+bool Game::Over() const
+{
+    return mOver;
+}
+
+GameResult const& Game::Result() const
+{
     return mResult;
+}
+
+void Game::StartTurn(Dragon& dragon)
+{
+    mEmit(EventTurnStart{dragon.mId});
+    dragon.mSonarInbox.clear();
+    dragon.mSonarEchoes = {};
 }
 
 void Game::TakeTurn(DragonId id)
@@ -146,14 +222,17 @@ void Game::TakeTurn(DragonId id)
         return;
     }
 
-    mEmit(EventTurnStart{id});
     std::string const roundBlock = BuildRoundBlock(mState, *dragon);
-    dragon->mSonarInbox.clear();
-    dragon->mSonarEchoes = {};
+    StartTurn(*dragon);
     mTurnInstructions.reset();
     mTurnTle = false;
     std::string const replyText = mControllers.at(id)(roundBlock);
-    ControllerReply const reply = ReadReply(*dragon, replyText, mKeep, mEmit);
+    FinishTurn(id, ReadReply(*dragon, replyText, mKeep, mEmit));
+}
+
+void Game::FinishTurn(DragonId id, ControllerReply const& reply)
+{
+    Dragon* dragon = DragonById(mState, id);
     if (reply.mProtocolMajor)
     {
         dragon->mProtocolMajor = *reply.mProtocolMajor;
@@ -174,8 +253,11 @@ void Game::TakeTurn(DragonId id)
     {
         if (std::optional<DragonId> childId = Split(mState, *dragon, split->mChildSegmentCount, mEmit))
         {
-            Dragon const& child = *DragonById(mState, *childId);
-            mControllers[child.mId] = mSpawnController(child);
+            if (mSpawnController)
+            {
+                Dragon const& child = *DragonById(mState, *childId);
+                mControllers[child.mId] = mSpawnController(child);
+            }
         }
     }
     else

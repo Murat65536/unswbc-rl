@@ -1,6 +1,7 @@
 #include "engine/scoring.h"
 
 #include <algorithm>
+#include <tuple>
 #include <utility>
 
 // NOTE: i know that this is inefficient since we will recompute the results even in rounds that haven't ended yet
@@ -19,6 +20,11 @@ GameResult ResultAfterRound(GameState const& state, bool finalRound)
         standing.mDragonCount += 1;
         standing.mLongestDragon = std::max(standing.mLongestDragon, length);
         standing.mTotalLength += length;
+        // Dragons 0 and 1 are the queens: the map alternates teams line by line.
+        if (dragon.mId <= 1)
+        {
+            standing.mQueenLength = length;
+        }
     }
 
     bool const teamAEliminated = result.mTeamA.mDragonCount == 0;
@@ -42,7 +48,10 @@ GameResult ResultAfterRound(GameState const& state, bool finalRound)
 
     result.mTerminated = true;
     result.mEndReason = GameEndReason::RoundLimit;
-    auto const rank = [](TeamStanding const& standing) { return std::pair{standing.mLongestDragon, standing.mTotalLength}; };
+    // 1.2.3 ranks the queen first, then the longest dragon, then total length.
+    auto const rank = [](TeamStanding const& standing) {
+        return std::tuple{standing.mQueenLength, standing.mLongestDragon, standing.mTotalLength};
+    };
     if (rank(result.mTeamA) > rank(result.mTeamB))
     {
         result.mWinner = Team::A;

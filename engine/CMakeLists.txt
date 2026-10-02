@@ -1,6 +1,22 @@
 cmake_minimum_required(VERSION 3.18)
 project(engine)
 
+# Replays need Cap'n Proto, which training never does: a training build leaves
+# it out (and with it Game::WriteReplay), so the engine has no dependencies.
+option(UNSWBC_ENGINE_REPLAY "Build replay writing (fetches Cap'n Proto)" OFF)
+
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cc")
+file(GLOB_RECURSE ENGINE_HEADERS CONFIGURE_DEPENDS "include/*.h")
+
+if(NOT UNSWBC_ENGINE_REPLAY)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX ".*/replay\\.cc$")
+    add_library(engine STATIC ${ENGINE_SOURCES} ${ENGINE_HEADERS})
+    target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_compile_features(engine PUBLIC cxx_std_23)
+    set_target_properties(engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    return()
+endif()
+
 include(FetchContent)
 
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
@@ -44,9 +60,8 @@ unset(CAPNP_INCLUDE_DIRECTORY CACHE)
 
 capnp_generate_cpp(REPLAY_SOURCES REPLAY_HEADERS replay.capnp)
 
-file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cc")
-file(GLOB_RECURSE ENGINE_HEADERS CONFIGURE_DEPENDS "include/*.h")
-
 add_library(engine STATIC ${ENGINE_SOURCES} ${ENGINE_HEADERS} ${REPLAY_SOURCES})
 target_include_directories(engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+target_compile_features(engine PUBLIC cxx_std_23)
+target_compile_definitions(engine PUBLIC UNSWBC_ENGINE_REPLAY)
 target_link_libraries(engine PUBLIC CapnProto::capnp)

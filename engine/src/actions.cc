@@ -6,9 +6,12 @@
 
 void Move(GameState& state, Dragon& dragon, std::vector<Direction> const& steps, EventSink const& emit)
 {
+    // 1.2.3: the first ceil(L / 4) steps are free, with L fixed when the move
+    // starts (1.0.2 charged for every step after the first).
+    size_t const freeSteps = (dragon.mBody.size() + 3) / 4;
     for (size_t stepIndex = 0; stepIndex < steps.size(); stepIndex++)
     {
-        bool const mustPayForStep = stepIndex > 0;
+        bool const mustPayForStep = stepIndex >= freeSteps;
         if (mustPayForStep)
         {
             if (dragon.mBody.size() <= static_cast<size_t>(MIN_DRAGON_LENGTH))

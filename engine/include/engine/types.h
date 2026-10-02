@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -45,7 +46,10 @@ int const MAX_TEAM_TEXT = 16 << 20;
 /// Drawn as one line over the dragon; much longer runs off the board.
 int const MAX_INDICATOR = 512;
 
-uint32_t const PEARL_RNG_SEED = 0x5eed5eed;
+/// The pearl generator. 1.0.2 seeded a std::mt19937 with a fixed 0x5eed5eed, so
+/// every match on a map had the same pearls; 1.2.3 seeds a std::mt19937_64 with
+/// the match's 64-bit seed (`unswbc run --seed`, and shown in every replay).
+using PearlRng = std::mt19937_64;
 
 enum class Team : char
 {
@@ -233,6 +237,9 @@ struct TeamStanding
     int mDragonCount = 0;
     int mLongestDragon = 0;
     int mTotalLength = 0;
+    /// Length of the team's queen (dragon 0 or 1), 0 once it is dead. The
+    /// first tiebreak since 1.2.x; 1.0.2 had no queen.
+    int mQueenLength = 0;
 };
 
 struct GameResult
@@ -274,6 +281,9 @@ struct DebugOutput
     /// Hold each team to MAX_TEAM_NOTES, MAX_TEAM_TEXT and MAX_INDICATOR, as
     /// the judge does. A local run can go without.
     bool mLimits = true;
+    /// Keep every event in Game::Events(), for a replay. A training game turns
+    /// this off, or a long game holds every pearl countdown it ever drew.
+    bool mRecord = true;
 };
 
 struct ActionMove
