@@ -14,6 +14,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace core {
@@ -327,8 +328,8 @@ inline bool SplitLegal(View const& view)
     return view.mLength >= 4 && view.mUnitCount < view.mUnitLimit;
 }
 
-/// 1 for every action allowed at `level` (0 or 1).
-inline void Mask(View const& view, int level, uint8_t* out)
+/// 1 for every action allowed at `level` (0 or 1), given the view's LookAhead.
+inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* out)
 {
     for (int a = 0; a < kNumActions; a++)
     {
@@ -339,7 +340,6 @@ inline void Mask(View const& view, int level, uint8_t* out)
     {
         return;
     }
-    MoveSight const sight = LookAhead(view);
     std::array<uint8_t, kNumActions> strict{};
     bool any = false;
     for (int a = 0; a < kNumActions; a++)
@@ -398,7 +398,7 @@ constexpr int kPlaneOwnHead = 12;
 constexpr int kPlanePartDir = 18;
 
 /// The window tile shown at egocentric (row, col) for this facing.
-inline int WorldTile(int facing, int row, int col)
+constexpr int WorldTile(int facing, int row, int col)
 {
     int const forward = kRadius - row;
     int const right = col - kRadius;
@@ -407,6 +407,25 @@ inline int WorldTile(int facing, int row, int col)
     int const dy = forward * kStepY[facing] + right * kStepY[rightDir];
     return (kRadius + dy) * kVision + (kRadius + dx);
 }
+
+/// WorldTile for every facing and egocentric cell.
+struct EgoTable
+{
+    std::array<std::array<uint8_t, kTiles>, 4> mTile{};
+
+    constexpr EgoTable()
+    {
+        for (int facing = 0; facing < 4; facing++)
+        {
+            for (int cell = 0; cell < kTiles; cell++)
+            {
+                mTile[facing][cell] = static_cast<uint8_t>(WorldTile(facing, cell / kVision, cell % kVision));
+            }
+        }
+    }
+};
+
+inline constexpr EgoTable kEgo{};
 
 inline float FeatureScale(int feature)
 {
@@ -429,19 +448,19 @@ inline float FeatureScale(int feature)
     }
 }
 
-inline void Encode(View const& view, uint8_t* out)
+inline void Mask(View const& view, int level, uint8_t* out)
 {
-    for (int i = 0; i < kObsSize; i++)
-    {
-        out[i] = 0;
-    }
+    Mask(view, LookAhead(view), level, out);
+}
+
+inline void Encode(View const& view, MoveSight const& sight, uint8_t* out)
+{
+    std::memset(out, 0, kObsSize);
     int const facing = view.mFacing;
-    for (int row = 0; row < kVision; row++)
+    for (int cell = 0; cell < kTiles; cell++)
     {
-        for (int col = 0; col < kVision; col++)
         {
-            int const cell = row * kVision + col;
-            TileView const& tile = view.mTiles[WorldTile(facing, row, col)];
+            TileView const& tile = view.mTiles[kEgo.mTile[facing][cell]];
             auto const set = [&](int plane, int code) { out[plane * kTiles + cell] = static_cast<uint8_t>(code); };
             set(kPlanePearl, tile.mPearl);
             if (tile.mPearlIn < 0)
@@ -487,7 +506,6 @@ inline void Encode(View const& view, uint8_t* out)
     scalars[4] = static_cast<uint8_t>((view.mRound < kMaxRounds ? view.mRound : kMaxRounds - 1) / 2);
     scalars[5] = view.mId >= 0 && view.mId <= 1;
     scalars[6] = SplitLegal(view);
-    MoveSight const sight = LookAhead(view);
     for (int i = 0; i < kSingleSteps; i++)
     {
         int const target = sight.mTarget[i];
@@ -510,6 +528,11 @@ inline void Encode(View const& view, uint8_t* out)
         scalars[22 + a - kSingleSteps] = sight.mVisiblyFatal[a];
     }
     scalars[31] = free >= 2;
+}
+
+inline void Encode(View const& view, uint8_t* out)
+{
+    Encode(view, LookAhead(view), out);
 }
 
 } // namespace core

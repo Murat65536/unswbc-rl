@@ -232,7 +232,21 @@ char const* SymmetryName(Symmetry symmetry)
     return "";
 }
 
-std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
+namespace {
+
+struct Generated
+{
+    MapGenConfig mConfig;
+    Board mBoard;
+    std::vector<std::array<int, 2>> mGaps;
+    std::vector<std::vector<Point>> mTeamA;
+    /// Each portal id's two ends, in id order.
+    std::vector<std::array<EdgeIndex, 2>> mPortals;
+
+    explicit Generated(MapGenConfig const& config) : mConfig(config), mBoard(config) {}
+};
+
+Generated Generate(MapGenConfig const& config, uint64_t seed)
 {
     RUNTIME_ASSERT(config.mWidth >= VISION_SIZE && config.mHeight >= VISION_SIZE && config.mWidth <= MAX_MAP_SIDE &&
                        config.mHeight <= MAX_MAP_SIDE,
@@ -244,13 +258,14 @@ std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
                    "bad pearl gap range");
 
     Draws draws(seed);
-    Board board(config);
-    GameState const& state = board.mState;
+    Generated generated(config);
+    Board& board = generated.mBoard;
     int const width = config.mWidth;
     int const height = config.mHeight;
 
     // Pearl beds: a tile and its mirror share one spawn range.
-    std::vector<std::array<int, 2>> gaps(width * height, {0, 0});
+    std::vector<std::array<int, 2>>& gaps = generated.mGaps;
+    gaps.assign(width * height, {0, 0});
     for (int y = 0; y < height; y++)
     {
         for (int x = 0; x < width; x++)
@@ -269,7 +284,7 @@ std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
 
     // Dragons first, on an open board, so their bodies are connected; team B
     // is team A mirrored. Kelp and portals then keep off their neighbourhood.
-    std::vector<std::vector<Point>> teamA;
+    std::vector<std::vector<Point>>& teamA = generated.mTeamA;
     for (int i = 0; i < config.mDragonsPerTeam; i++)
     {
         std::vector<Point> body;
@@ -334,12 +349,28 @@ std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
         }
         int const axis = board.Axis(a);
         board.mPortal[axis][board.Index(a)] = board.mPortal[axis][board.Index(b)] = nextPortal++;
+        generated.mPortals.push_back({a, b});
         if (!selfMirrored)
         {
             board.mPortal[axis][board.Index(ma)] = board.mPortal[axis][board.Index(mb)] = nextPortal++;
+            generated.mPortals.push_back({ma, mb});
         }
         placed++;
     }
+    return generated;
+}
+
+} // namespace
+
+std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
+{
+    Generated const generated = Generate(config, seed);
+    Board const& board = generated.mBoard;
+    GameState const& state = board.mState;
+    std::vector<std::array<int, 2>> const& gaps = generated.mGaps;
+    std::vector<std::vector<Point>> const& teamA = generated.mTeamA;
+    int const width = config.mWidth;
+    int const height = config.mHeight;
 
     std::ostringstream out;
     out << "MAP " << width << " " << height << "\n";
@@ -409,6 +440,73 @@ std::string GenerateMapText(MapGenConfig const& config, uint64_t seed)
         }
     }
     return out.str();
+}
+
+GameState GenerateMapState(MapGenConfig const& config, uint64_t seed)
+{
+    // What LoadMap would make of GenerateMapText's text, built directly:
+    // tests/test_rules.py checks the two agree field by field.
+    Generated generated = Generate(config, seed);
+    Board& board = generated.mBoard;
+    GameState state = std::move(board.mState);
+    int const width = config.mWidth;
+    int const height = config.mHeight;
+    state.mUnitLimit = config.mUnitLimit;
+    state.mTiles = Array2d<Tile>(width, height);
+    state.mHorizontalEdges = Array2d<Edge>(width, height);
+    state.mVerticalEdges = Array2d<Edge>(width, height);
+    state.mOccupant = Array2d<DragonId>(width, height, NO_DRAGON);
+
+    for (int y = 0; y < height; y++)
+    {
+        for (int x = 0; x < width; x++)
+        {
+            auto const [lo, hi] = generated.mGaps[y * width + x];
+            if (hi > 0)
+            {
+                Tile& tile = state.mTiles.At(x, y);
+                tile.mSpawnsPearls = true;
+                tile.mMinRespawnGap = lo;
+                tile.mMaxRespawnGap = hi;
+            }
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (board.mKelp[axis][y * width + x])
+                {
+                    (axis == 0 ? state.mHorizontalEdges : state.mVerticalEdges).At(x, y).mKind = EdgeKind::Kelp;
+                }
+            }
+        }
+    }
+    for (size_t id = 0; id < generated.mPortals.size(); id++)
+    {
+        auto const [a, b] = generated.mPortals[id];
+        Edge& from = EdgeAt(state, a);
+        Edge& to = EdgeAt(state, b);
+        from.mKind = to.mKind = EdgeKind::Portal;
+        from.mPortalId = to.mPortalId = static_cast<int>(id);
+        from.mPortalPartner = b;
+        to.mPortalPartner = a;
+    }
+
+    for (std::vector<Point> const& body : generated.mTeamA)
+    {
+        for (int team = 0; team < 2; team++)
+        {
+            Dragon dragon;
+            dragon.mId = state.mNextDragonId++;
+            dragon.mTeam = team == 0 ? Team::A : Team::B;
+            for (Point const segment : body)
+            {
+                Point const p = team == 0 ? segment : MirrorTile(state, segment);
+                dragon.mBody.push_back(p);
+                state.mOccupant.At(p) = dragon.mId;
+            }
+            dragon.mFacing = *DirectionOfStepBetween(state, dragon.mBody[1], dragon.mBody[0]);
+            state.mDragons.push_back(std::move(dragon));
+        }
+    }
+    return state;
 }
 
 } // namespace core

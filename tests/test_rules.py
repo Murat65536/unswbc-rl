@@ -238,3 +238,16 @@ def test_occupancy_grid_tracks_every_body():
         m.run(reply, spawn=players.spawn)
         m.check_invariants()
     assert turns > 3000
+
+
+def test_generated_board_equals_its_loaded_text():
+    """Training builds generated boards directly; the judge only takes text.
+    Both must be the same board."""
+    import random
+
+    rng = random.Random(7)
+    for seed in range(60):
+        args = dict(width=rng.randint(10, 48), height=rng.randint(10, 48), symmetry=["x", "y", "xy"][seed % 3],
+                    seed=rng.getrandbits(64), dragons_per_team=rng.randint(1, 4), portal_pairs=rng.randint(0, 8),
+                    kelp=rng.choice([0.0, 0.1, 0.3]), unit_limit=rng.choice([64, 5]))
+        assert bccore.generated_state_difference(**args) is None, args

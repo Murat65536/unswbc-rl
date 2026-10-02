@@ -1,5 +1,6 @@
 // Python bindings for the C++ core (module `bccore`).
 
+#include "core/batch_env.h"
 #include "core/features.h"
 #include "core/mapgen.h"
 #include "core/state_view.h"
@@ -53,6 +54,14 @@ template <typename T> nb::ndarray<nb::numpy, T> ToNumpy(std::vector<T> values)
     auto* owned = new std::vector<T>(std::move(values));
     nb::capsule owner(owned, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
     return nb::ndarray<nb::numpy, T>(owned->data(), {owned->size()}, owner);
+}
+
+template <typename T> nb::ndarray<nb::numpy, T> ToNumpy2(std::vector<T> values, size_t columns)
+{
+    size_t const rows = columns == 0 ? 0 : values.size() / columns;
+    auto* owned = new std::vector<T>(std::move(values));
+    nb::capsule owner(owned, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+    return nb::ndarray<nb::numpy, T>(owned->data(), {rows, columns}, owner);
 }
 
 core::View ViewFromBlocks(std::string const& init, std::string const& round)
@@ -404,6 +413,220 @@ class Match
     nb::object mDeath = nb::none();
 };
 
+/// None if two boards are the same in every field the engine reads.
+std::optional<std::string> BoardDifference(GameState const& a, GameState const& b)
+{
+    auto const differ = [](std::string what) { return std::optional<std::string>(std::move(what)); };
+    if (a.mWidth != b.mWidth || a.mHeight != b.mHeight || a.mUnitLimit != b.mUnitLimit || a.mRound != b.mRound ||
+        a.mSymmetry != b.mSymmetry || a.mNextDragonId != b.mNextDragonId)
+    {
+        return differ("header");
+    }
+    for (int y = 0; y < a.mHeight; y++)
+    {
+        for (int x = 0; x < a.mWidth; x++)
+        {
+            Tile const& s = a.mTiles.At(x, y);
+            Tile const& t = b.mTiles.At(x, y);
+            if (s.mHasPearl != t.mHasPearl || s.mSpawnsPearls != t.mSpawnsPearls || s.mMinRespawnGap != t.mMinRespawnGap ||
+                s.mMaxRespawnGap != t.mMaxRespawnGap || s.mNextPearl != t.mNextPearl)
+            {
+                return differ("tile " + std::to_string(x) + "," + std::to_string(y));
+            }
+            for (int axis = 0; axis < 2; axis++)
+            {
+                Edge const& e = (axis == 0 ? a.mHorizontalEdges : a.mVerticalEdges).At(x, y);
+                Edge const& f = (axis == 0 ? b.mHorizontalEdges : b.mVerticalEdges).At(x, y);
+                if (e.mKind != f.mKind || e.mPortalId != f.mPortalId || !(e.mPortalPartner == f.mPortalPartner))
+                {
+                    return differ("edge " + std::to_string(axis) + " " + std::to_string(x) + "," + std::to_string(y));
+                }
+            }
+            if (a.mOccupant.At(x, y) != b.mOccupant.At(x, y))
+            {
+                return differ("occupant " + std::to_string(x) + "," + std::to_string(y));
+            }
+        }
+    }
+    if (a.mDragons.size() != b.mDragons.size())
+    {
+        return differ("dragon count");
+    }
+    for (size_t i = 0; i < a.mDragons.size(); i++)
+    {
+        Dragon const& d = a.mDragons[i];
+        Dragon const& e = b.mDragons[i];
+        if (d.mId != e.mId || d.mTeam != e.mTeam || d.mBody != e.mBody || d.mFacing != e.mFacing ||
+            d.mProtocolMajor != e.mProtocolMajor || d.mAlive != e.mAlive)
+        {
+            return differ("dragon " + std::to_string(i));
+        }
+    }
+    return std::nullopt;
+}
+
+template <typename T> using Array2 = nb::ndarray<T, nb::shape<-1, -1>, nb::c_contig, nb::device::cpu>;
+template <typename T> using Array1 = nb::ndarray<T, nb::shape<-1>, nb::c_contig, nb::device::cpu>;
+
+core::EnvConfig ConfigFrom(nb::dict const& options)
+{
+    core::EnvConfig c;
+    for (auto [key, value] : options)
+    {
+        std::string const name = nb::cast<std::string>(key);
+        auto const pair = [&](int& lo, int& hi) {
+            auto const [a, b] = nb::cast<std::pair<int, int>>(value);
+            lo = a;
+            hi = b;
+        };
+        auto const pairf = [&](float& lo, float& hi) {
+            auto const [a, b] = nb::cast<std::pair<float, float>>(value);
+            lo = a;
+            hi = b;
+        };
+        if (name == "threads") c.mThreads = nb::cast<int>(value);
+        else if (name == "mask_level") c.mMaskLevel = nb::cast<int>(value);
+        else if (name == "max_rounds") c.mMaxRounds = nb::cast<int>(value);
+        else if (name == "gamma") c.mGamma = nb::cast<float>(value);
+        else if (name == "win") c.mWin = nb::cast<float>(value);
+        else if (name == "loss") c.mLoss = nb::cast<float>(value);
+        else if (name == "draw") c.mDraw = nb::cast<float>(value);
+        else if (name == "shaping") c.mShaping = nb::cast<float>(value);
+        else if (name == "queen_weight") c.mQueenWeight = nb::cast<float>(value);
+        else if (name == "width") pair(c.mWidthLo, c.mWidthHi);
+        else if (name == "height") pair(c.mHeightLo, c.mHeightHi);
+        else if (name == "symmetries")
+        {
+            c.mSymmetries = 0;
+            for (std::string const& s : nb::cast<std::vector<std::string>>(value))
+            {
+                c.mSymmetries |= s == "x" ? 1 : s == "y" ? 2 : s == "xy" ? 4 : throw nb::value_error("symmetries are x, y, xy");
+            }
+        }
+        else if (name == "dragons_per_team") pair(c.mDragonsLo, c.mDragonsHi);
+        else if (name == "start_length") pair(c.mStartLengthLo, c.mStartLengthHi);
+        else if (name == "kelp") pairf(c.mKelpLo, c.mKelpHi);
+        else if (name == "portal_pairs") pair(c.mPortalsLo, c.mPortalsHi);
+        else if (name == "pearl_beds") pairf(c.mBedsLo, c.mBedsHi);
+        else if (name == "gap_min_hi") pair(c.mGapMinHiLo, c.mGapMinHiHi);
+        else if (name == "gap_spread") pair(c.mGapSpreadLo, c.mGapSpreadHi);
+        else if (name == "unit_limit") c.mUnitLimit = nb::cast<int>(value);
+        else if (name == "maps") c.mMaps = nb::cast<std::vector<std::string>>(value);
+        else if (name == "map_prob") c.mMapProb = nb::cast<float>(value);
+        else throw nb::value_error(("unknown environment option: " + name).c_str());
+    }
+    return c;
+}
+
+/// The environment, writing into arrays the caller owns (numpy or torch).
+class PyBatchEnv
+{
+  public:
+    PyBatchEnv(int numGames, uint64_t seed, nb::dict const& options) : mEnv(numGames, ConfigFrom(options), seed) {}
+
+    nb::dict Reset(Array2<uint8_t> obs, Array2<uint8_t> mask, Array2<float> privileged, Array1<int64_t> prevRow,
+                   Array1<float> prevReward, Array2<int32_t> info)
+    {
+        core::DecisionOut const out = Out(obs, mask, privileged, prevRow, prevReward, info);
+        {
+            nb::gil_scoped_release release;
+            mEnv.Reset(out);
+        }
+        return Results();
+    }
+
+    nb::dict Step(Array1<int32_t> actions, Array2<uint8_t> obs, Array2<uint8_t> mask, Array2<float> privileged,
+                  Array1<int64_t> prevRow, Array1<float> prevReward, Array2<int32_t> info)
+    {
+        Check(actions.shape(0) == static_cast<size_t>(mEnv.NumGames()), "actions");
+        core::DecisionOut const out = Out(obs, mask, privileged, prevRow, prevReward, info);
+        int32_t const* data = actions.data();
+        {
+            nb::gil_scoped_release release;
+            mEnv.Step(data, out);
+        }
+        return Results();
+    }
+
+    core::BatchEnv& Env()
+    {
+        return mEnv;
+    }
+
+  private:
+    static void Check(bool ok, char const* what)
+    {
+        if (!ok)
+        {
+            throw nb::value_error((std::string("wrong shape: ") + what).c_str());
+        }
+    }
+
+    core::DecisionOut Out(Array2<uint8_t>& obs, Array2<uint8_t>& mask, Array2<float>& privileged, Array1<int64_t>& prevRow,
+                          Array1<float>& prevReward, Array2<int32_t>& info)
+    {
+        size_t const n = mEnv.NumGames();
+        Check(obs.shape(0) == n && obs.shape(1) == core::kObsSize, "obs");
+        Check(mask.shape(0) == n && mask.shape(1) == core::kNumActions, "mask");
+        Check(privileged.shape(0) == n && privileged.shape(1) == core::kPrivileged, "privileged");
+        Check(prevRow.shape(0) == n && prevReward.shape(0) == n, "prev_row / prev_reward");
+        Check(info.shape(0) == n && info.shape(1) == core::kInfo, "info");
+        return {obs.data(), mask.data(), privileged.data(), prevRow.data(), prevReward.data(), info.data()};
+    }
+
+    nb::dict Results() const
+    {
+        nb::dict out;
+        auto const& done = mEnv.Completions();
+        std::vector<int64_t> rows;
+        std::vector<float> rewards;
+        std::vector<int32_t> boots;
+        for (core::Completion const& c : done)
+        {
+            rows.push_back(c.mRow);
+            rewards.push_back(c.mReward);
+            boots.push_back(c.mBoot);
+        }
+        out["done_row"] = ToNumpy(std::move(rows));
+        out["done_reward"] = ToNumpy(std::move(rewards));
+        out["done_boot"] = ToNumpy(std::move(boots));
+        out["boot_obs"] = ToNumpy2(mEnv.BootObs(), core::kObsSize);
+        out["boot_mask"] = ToNumpy2(mEnv.BootMask(), core::kNumActions);
+        out["boot_priv"] = ToNumpy2(mEnv.BootPrivileged(), core::kPrivileged);
+
+        std::vector<int32_t> slot, mapIndex, rounds, outcome, dragons, totalA, totalB, queenA, queenB;
+        std::vector<uint64_t> level;
+        for (core::EpisodeInfo const& e : mEnv.Episodes())
+        {
+            slot.push_back(e.mSlot);
+            level.push_back(e.mLevelSeed);
+            mapIndex.push_back(e.mMapIndex);
+            rounds.push_back(e.mRounds);
+            outcome.push_back(e.mOutcome);
+            dragons.push_back(e.mDragons);
+            totalA.push_back(e.mTotal[0]);
+            totalB.push_back(e.mTotal[1]);
+            queenA.push_back(e.mQueen[0]);
+            queenB.push_back(e.mQueen[1]);
+        }
+        nb::dict episodes;
+        episodes["slot"] = ToNumpy(std::move(slot));
+        episodes["level_seed"] = ToNumpy(std::move(level));
+        episodes["map_index"] = ToNumpy(std::move(mapIndex));
+        episodes["rounds"] = ToNumpy(std::move(rounds));
+        episodes["outcome"] = ToNumpy(std::move(outcome));
+        episodes["dragons"] = ToNumpy(std::move(dragons));
+        episodes["total_a"] = ToNumpy(std::move(totalA));
+        episodes["total_b"] = ToNumpy(std::move(totalB));
+        episodes["queen_a"] = ToNumpy(std::move(queenA));
+        episodes["queen_b"] = ToNumpy(std::move(queenB));
+        out["episodes"] = episodes;
+        return out;
+    }
+
+    core::BatchEnv mEnv;
+};
+
 } // namespace
 
 NB_MODULE(bccore, m)
@@ -438,6 +661,23 @@ NB_MODULE(bccore, m)
         "kelp"_a = 0.05, "portal_pairs"_a = 2, "pearl_beds"_a = 0.4, "gap_min_lo"_a = 1, "gap_min_hi"_a = 10,
         "gap_spread"_a = 60, "unit_limit"_a = DEFAULT_UNIT_LIMIT,
         "A symmetric .map text, the same for the same arguments on every platform.");
+    m.def(
+        "generated_state_difference",
+        [](int width, int height, std::string const& symmetry, uint64_t seed, int dragons_per_team, int portal_pairs,
+           double kelp, int unit_limit) {
+            core::MapGenConfig config;
+            config.mWidth = width;
+            config.mHeight = height;
+            config.mSymmetry = SymmetryFrom(symmetry);
+            config.mDragonsPerTeam = dragons_per_team;
+            config.mPortalPairs = portal_pairs;
+            config.mKelp = kelp;
+            config.mUnitLimit = unit_limit;
+            return BoardDifference(core::GenerateMapState(config, seed), LoadMap(core::GenerateMapText(config, seed)));
+        },
+        "width"_a, "height"_a, "symmetry"_a, "seed"_a, "dragons_per_team"_a = 2, "portal_pairs"_a = 2, "kelp"_a = 0.05,
+        "unit_limit"_a = DEFAULT_UNIT_LIMIT,
+        "None if the board built directly equals LoadMap of the generated text.");
 
     m.attr("OBS_SIZE") = core::kObsSize;
     m.attr("NUM_PLANES") = core::kPlanes;
@@ -470,6 +710,29 @@ NB_MODULE(bccore, m)
             return core::FormatCommand(core::Decode(ViewFromBlocks(init, round), action));
         },
         "init"_a, "round_block"_a, "action"_a, "The reply line an action makes, e.g. 'MOVE NE'.");
+
+    m.attr("NUM_INFO") = core::kInfo;
+    m.def(
+        "level_map",
+        [](uint64_t level_seed, nb::dict const& options) {
+            core::EnvConfig const config = ConfigFrom(options);
+            core::Level const level = core::MakeLevel(config, level_seed);
+            return nb::make_tuple(core::LevelText(config, level), level.mMatchSeed, level.mMapIndex);
+        },
+        "level_seed"_a, "options"_a = nb::dict(),
+        "(map text, match seed, fixed-map index or -1) of the level a seed names under these options.");
+
+    nb::class_<PyBatchEnv>(m, "BatchEnv")
+        .def(nb::init<int, uint64_t, nb::dict const&>(), "num_games"_a, "seed"_a = 0, "options"_a = nb::dict())
+        .def_prop_ro("num_games", [](PyBatchEnv& self) { return self.Env().NumGames(); })
+        .def_prop_ro("threads", [](PyBatchEnv& self) { return self.Env().Threads(); })
+        .def_prop_ro("step_index", [](PyBatchEnv& self) { return self.Env().StepIndex(); })
+        .def_prop_ro("turns", [](PyBatchEnv& self) { return self.Env().Turns(); })
+        .def("set_next_level", [](PyBatchEnv& self, int slot, uint64_t seed) { self.Env().SetNextLevel(slot, seed); },
+             "slot"_a, "level_seed"_a)
+        .def("reset", &PyBatchEnv::Reset, "obs"_a, "mask"_a, "priv"_a, "prev_row"_a, "prev_reward"_a, "info"_a)
+        .def("step", &PyBatchEnv::Step, "actions"_a, "obs"_a, "mask"_a, "priv"_a, "prev_row"_a, "prev_reward"_a,
+             "info"_a);
 
     nb::class_<Match>(m, "Match")
         .def(nb::init<std::string const&, uint64_t, bool>(), "map_text"_a, "seed"_a = 0, "record"_a = false)

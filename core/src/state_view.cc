@@ -68,26 +68,36 @@ void ViewFromState(GameState const& state, Dragon const& dragon, View& view)
     }
 
     Point const head = dragon.mBody.front();
+    // The window's columns and rows, wrapped, with one more on the east and
+    // south for the far edges (protocol.cc VisionTileAt and EdgeOnTileSide).
+    std::array<int, kVision + 1> xs{};
+    std::array<int, kVision + 1> ys{};
+    for (int i = 0; i <= kVision; i++)
+    {
+        xs[i] = ((head.x + i - kRadius) % state.mWidth + state.mWidth) % state.mWidth;
+        ys[i] = ((head.y + i - kRadius) % state.mHeight + state.mHeight) % state.mHeight;
+    }
     // Up to 49 distinct dragons can be in sight; most windows hold one or two.
     std::array<DragonId, kTiles> seen{};
     int seenCount = 0;
     for (int row = 0; row < kVision; row++)
     {
+        int const y = ys[row];
         for (int col = 0; col < kVision; col++)
         {
-            Point const at = WrapOntoBoard(state, {head.x + col - kRadius, head.y + row - kRadius});
+            int const x = xs[col];
             TileView& tile = view.mTiles[row * kVision + col];
-            Tile const& contents = state.mTiles.At(at);
-            tile.mX = static_cast<int16_t>(at.x);
-            tile.mY = static_cast<int16_t>(at.y);
+            Tile const& contents = state.mTiles.At(x, y);
+            tile.mX = static_cast<int16_t>(x);
+            tile.mY = static_cast<int16_t>(y);
             tile.mPearl = contents.mHasPearl;
             tile.mPearlIn = contents.mSpawnsPearls ? contents.mNextPearl : -1;
-            for (Direction const side : ALL_DIRECTIONS)
-            {
-                tile.mEdges[ToView(side)] = ToView(EdgeAt(state, EdgeOnTileSide(state, at, side)));
-            }
+            tile.mEdges[kNorth] = ToView(state.mHorizontalEdges.At(x, y));
+            tile.mEdges[kSouth] = ToView(state.mHorizontalEdges.At(x, ys[row + 1]));
+            tile.mEdges[kWest] = ToView(state.mVerticalEdges.At(x, y));
+            tile.mEdges[kEast] = ToView(state.mVerticalEdges.At(xs[col + 1], y));
             tile.mPart = {};
-            DragonId const occupant = state.mOccupant.At(at);
+            DragonId const occupant = state.mOccupant.At(x, y);
             if (occupant != NO_DRAGON && std::find(seen.begin(), seen.begin() + seenCount, occupant) == seen.begin() + seenCount)
             {
                 seen[seenCount++] = occupant;
@@ -109,18 +119,43 @@ void ViewFromState(GameState const& state, Dragon const& dragon, View& view)
             {
                 continue;
             }
-            PartView& part = view.mTiles[(kRadius + dy) * kVision + (kRadius + dx)].mPart;
+            TileView& tile = view.mTiles[(kRadius + dy) * kVision + (kRadius + dx)];
+            PartView& part = tile.mPart;
             part.mId = other.mId;
             part.mTeam = other.mTeam == Team::A ? 0 : 1;
             part.mHead = segment == 0;
             if (segment == 0)
             {
                 part.mDir = ToView(other.mFacing);
+                continue;
+            }
+            // DirectionOfStepBetween: the first of N, E, S, W whose step
+            // reaches the segment before. With no portal on this tile every
+            // step is a plain one, so the coordinates alone decide it.
+            Point const next = other.mBody[segment - 1];
+            bool const portal = tile.mEdges[kNorth].mKind == kPortal || tile.mEdges[kEast].mKind == kPortal ||
+                                tile.mEdges[kSouth].mKind == kPortal || tile.mEdges[kWest].mKind == kPortal;
+            int const stepX = (next.x - at.x + state.mWidth) % state.mWidth;
+            int const stepY = (next.y - at.y + state.mHeight) % state.mHeight;
+            if (!portal && stepY == state.mHeight - 1 && stepX == 0)
+            {
+                part.mDir = kNorth;
+            }
+            else if (!portal && stepX == 1 && stepY == 0)
+            {
+                part.mDir = kEast;
+            }
+            else if (!portal && stepY == 1 && stepX == 0)
+            {
+                part.mDir = kSouth;
+            }
+            else if (!portal && stepX == state.mWidth - 1 && stepY == 0)
+            {
+                part.mDir = kWest;
             }
             else
             {
-                std::optional<Direction> const towardsHead =
-                    DirectionOfStepBetween(state, other.mBody[segment], other.mBody[segment - 1]);
+                std::optional<Direction> const towardsHead = DirectionOfStepBetween(state, at, next);
                 RUNTIME_ASSERT(towardsHead, "dragon segments are not adjacent");
                 part.mDir = ToView(*towardsHead);
             }

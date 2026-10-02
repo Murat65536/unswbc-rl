@@ -39,6 +39,10 @@ struct MapGenConfig
 /// objects (whose algorithms differ between standard libraries).
 std::string GenerateMapText(MapGenConfig const& config, uint64_t seed);
 
+/// The same board as LoadMap(GenerateMapText(config, seed)), built without
+/// writing and parsing the text (what a training reset uses).
+GameState GenerateMapState(MapGenConfig const& config, uint64_t seed);
+
 char const* SymmetryName(Symmetry symmetry);
 
 } // namespace core
