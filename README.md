@@ -138,11 +138,11 @@ sees of it back from its head, then what it remembered from there on). A body
 trails its head's path, so after L moves it knows all of it, far outside its
 window. From those:
 
-- an egocentric observation of 1232 uint8 codes: 24 planes over the 7×7
+- an egocentric observation of 1245 uint8 codes: 24 planes over the 7×7
   window rotated so the dragon faces up (pearls, countdowns, kelp and
   portals by relative side, own/ally/enemy heads and bodies with their
   relative headings, and the segments of this team's queen and of the
-  enemy queen), then 56 scalars (length, free sprint steps, units, round,
+  enemy queen), then 69 scalars (length, free sprint steps, units, round,
   queen, split legality, per-move flags: visibly fatal, pearl, enemy or
   ally head, out of sight; past each first step, how many tiles are
   reachable within the window and whether that region goes on out of
@@ -152,7 +152,11 @@ window. From those:
   many moves it can be sure of surviving: a depth-first search over its
   own future steps, up to its length plus 2 (8 to 24), with other dragons
   frozen and its own body, known from memory, freeing as its tail moves;
-  and whether its head is within two steps of its queen's head);
+  whether its head is within two steps of its queen's head; and how close
+  to an enemy each move ends, in the steps an enemy would need to get
+  there, counting the children enemies could split off: a split turns the
+  parent's tail into the child's head, and the child moves in the round it
+  is born, so every enemy tail can strike like a head);
 - 15 relative actions: one step forward/right/left, two steps (each
   forward/right/left, free from length 5), splitting off the rear half,
   shedding a two-segment tail (`SPLIT 2`), and dissolving (no action: the
@@ -162,17 +166,18 @@ window. From those:
   far end is in sight, its own tail when it knows the tail moves on, a
   second step it cannot pay for, an ally's head, and dissolving anywhere
   but within two steps of its queen's head, by a dragon of length 3 or
-  more; the queen never dissolves); level 2, the default,
-  also shields the queen, which decides the first round-limit tiebreak: it
-  never moves onto a head; of its other moves it keeps those it can be sure
-  of surviving its horizon after, out of one step's reach of enemy heads if
-  it can, else those that last longest (a move through a portal whose far
-  end it cannot see counts as lasting one move); it may shed from length 6
-  before round 350 while no enemy head is a step away, and splits in half
-  only when it has no move left. Every other dragon keeps out of its queen's way: it
-  does not end a move beside the queen's head while it has another move.
-  Each level falls back to the one below if it would leave nothing, and a
-  dragon with only fatal moves still avoids taking an ally with it.
+  more; the queen never dissolves); level 2, the default, also shields the
+  queen, which decides the first round-limit tiebreak: it never moves onto
+  a head; of its other moves it keeps those it can be sure of surviving its
+  horizon after, else those that last longest (a move through a portal
+  whose far end it cannot see counts as lasting one move), and of those
+  the ones that end out of every enemy's reach on its next turn (enemy
+  tails included), else out of one step's; it may shed from length 6
+  before round 350 while no enemy is a step away, and splits in half only
+  when it has no move left. Every other dragon keeps out of its queen's
+  way: it does not end a move beside the queen's head while it has another
+  move. Each level falls back to the one below if it would leave nothing,
+  and a dragon with only fatal moves still avoids taking an ally with it.
 
 The bot compiles these two headers unchanged, and keeps one memory. Training builds the View
 straight from the engine (**`state_view.h`**), and also gives the critic

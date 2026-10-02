@@ -327,12 +327,15 @@ def test_head_trades_and_the_queen():
     assert mask1[split] == 1 and mask1[right] == 1
     assert mask2[forward] == 0     # the queen trades with nobody
     assert mask2[split] == 0       # and never splits while it has a move
-    assert mask2[right] == 1
-    # Right then left ends at (9, 9), one step from dragon 3's head: safe for
-    # now, but the queen's shield keeps it out of that reach.
+    # Right ends at (8, 9), which dragon 3 could sprint to via (9, 9); right
+    # then left at (9, 9), one step from its head. Both are safe for now, but
+    # the queen's shield keeps out of reach while it can: two steps right,
+    # then forward or right again, end where dragon 3 cannot get.
     right_then_left = 3 + 3 * 1 + 2
-    assert mask1[right_then_left] == 1 and not m.probe(right_then_left)
-    assert mask2[right_then_left] == 0
+    for a in (right, right_then_left):
+        assert mask1[a] == 1 and not m.probe(a)
+        assert mask2[a] == 0
+    assert [a for a in range(12) if mask2[a]] == [3 + 3 * 1 + 0, 3 + 3 * 1 + 1]
     # The ally (2) faces south onto the queen's head: masked at level 1. Its
     # other moves end diagonally from the queen's head, out of its way.
     _, (_, mask1, mask2) = m.features(2)
@@ -340,6 +343,38 @@ def test_head_trades_and_the_queen():
     # The enemy (3) faces west onto A's queen's head: a trade it may make.
     _, (_, mask1, mask2) = m.features(3)
     assert mask1[forward] == 1 and mask2[forward] == 1
+
+
+@pytest.mark.parametrize("enemy_length, threatened", [(4, True), (3, False)])
+def test_the_queen_keeps_away_from_enemy_tails(enemy_length, threatened):
+    # The queen faces east at (8, 8). An enemy lies along row 9 heading west,
+    # its tail at (9, 9): split, its tail becomes a child's head facing west,
+    # which moves later in the same round and could step onto (9, 8), where
+    # the queen's step forward ends, or (8, 9), where its step right does.
+    # Its head is too far to get there; a dragon of length 3 cannot split.
+    enemy = [(9 + enemy_length - 1 - i, 9) for i in range(enemy_length)]
+    m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 2), (14, 2)]),
+                                       ("B", enemy)]), 0)
+    m.begin()
+    brain = bccore.Brain()
+    obs, (_, mask1, mask2) = brain.observe_match(m, 0)
+    threat, _ = brain.threat
+    forward, right, left = 0, 1, 2
+    assert scalar(obs, 38 + forward) == 0 and scalar(obs, 38 + right) == 0   # no head's reach
+    assert threat[forward] == threat[right] == (2 if threatened else 0)
+    # The observation says how close: 5 - steps, the tail's child one step
+    # from (9, 8), or the head three.
+    assert scalar(obs, 56 + forward) == (4 if threatened else 2)
+    for a in (forward, right, left):
+        assert mask1[a] == 1 and not m.probe(a)
+    # With the tail a threat, the queen's shield keeps out of the child's
+    # reach: forward and right end one step from it, and every other move
+    # but these three within two: left to (8, 7), and two steps left, to
+    # (8, 6) or (7, 7). Without, all three single steps are fine.
+    if threatened:
+        assert [a for a in range(12) if mask2[a]] == [left, 3 + 3 * 2 + 0, 3 + 3 * 2 + 2]
+    else:
+        assert mask2[forward] == mask2[right] == mask2[left] == 1
 
 
 def test_queen_planes():

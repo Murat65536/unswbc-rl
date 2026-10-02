@@ -100,7 +100,7 @@ def test_every_decision_saw_its_turns_board():
     rng = np.random.default_rng(1)
     env = bccore.BatchEnv(1, 0, OPTIONS)
     env.set_next_level(0, 123)
-    records = run(env, 6000, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
+    records = run(env, 9000, rng, split_bias=0.15, plan=lambda t: {0: 50_000 + t})
     seeds = episode_seeds(records, 123, 50_000)
 
     by_episode = {}
@@ -287,7 +287,7 @@ def test_episodes_report_the_queens(mask_level):
     n = 16
     env = bccore.BatchEnv(n, 4, dict(OPTIONS, mask_level=mask_level))
     rng = np.random.default_rng(4)
-    records = run(env, 4000, rng, split_bias=0.3)
+    records = run(env, 5000, rng, split_bias=0.3)
     games, splits, deciders, last_resort, causes = 0, 0, set(), 0, set()
     for buf, actions, out in records:
         for slot in range(n):

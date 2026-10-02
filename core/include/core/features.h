@@ -423,6 +423,45 @@ inline Region Explore(View const& view, int start)
     return Explore(view, start, OwnFreeTimes(view));
 }
 
+namespace detail
+{
+/// Marks where a head at `tile`, which cannot step towards `back`, could be
+/// after its next move: 2 one step on, 1 two (a sprint, its first step onto
+/// a tile with no dragon on it).
+inline void MarkReach(View const& view, int tile, int back, std::array<uint8_t, kTiles>& reach)
+{
+    for (int dir = 0; dir < 4; dir++)
+    {
+        if (dir == back)
+        {
+            continue;
+        }
+        int const t1 = StepTarget(view, tile, dir);
+        if (t1 < 0)
+        {
+            continue;
+        }
+        reach[t1] = 2;
+        if (view.mTiles[t1].mPart.mId >= 0)
+        {
+            continue;
+        }
+        for (int dir2 = 0; dir2 < 4; dir2++)
+        {
+            if (dir2 == ((dir + 2) & 3))
+            {
+                continue;
+            }
+            int const t2 = StepTarget(view, t1, dir2);
+            if (t2 >= 0 && reach[t2] < 1)
+            {
+                reach[t2] = 1;
+            }
+        }
+    }
+}
+} // namespace detail
+
 /// For each window tile, how soon a visible enemy head could move onto it on
 /// that enemy's next turn (every other dragon moves before this one moves
 /// again): 2 in one step, 1 in two (a sprint), 0 not as far as can be seen.
@@ -435,41 +474,125 @@ inline std::array<uint8_t, kTiles> EnemyReach(View const& view)
     for (int tile = 0; tile < kTiles; tile++)
     {
         PartView const& part = view.mTiles[tile].mPart;
-        if (part.mId < 0 || !part.mHead || part.mTeam == view.mTeam)
+        if (part.mId >= 0 && part.mHead && part.mTeam != view.mTeam)
         {
-            continue;
-        }
-        for (int dir = 0; dir < 4; dir++)
-        {
-            if (dir == ((part.mDir + 2) & 3))
-            {
-                continue;
-            }
-            int const t1 = StepTarget(view, tile, dir);
-            if (t1 < 0)
-            {
-                continue;
-            }
-            reach[t1] = 2;
-            if (view.mTiles[t1].mPart.mId >= 0)
-            {
-                continue;
-            }
-            for (int dir2 = 0; dir2 < 4; dir2++)
-            {
-                if (dir2 == ((dir + 2) & 3))
-                {
-                    continue;
-                }
-                int const t2 = StepTarget(view, t1, dir2);
-                if (t2 >= 0 && reach[t2] < 1)
-                {
-                    reach[t2] = 1;
-                }
-            }
+            detail::MarkReach(view, tile, (part.mDir + 2) & 3, reach);
         }
     }
     return reach;
+}
+
+/// How many steps a visible enemy needs to get its head onto each window
+/// tile, through tiles with no dragon on them (it can step onto one to end
+/// there), never back into its neck; 1 and 2 it can do on its next turn (a
+/// sprint), and kFarFromEnemies stands for that many or more, or out of its
+/// reach in sight. It counts enemy heads, and enemy tails too: a split turns
+/// the parent's tail into the child's head, facing away from the parent, and
+/// the child moves later in the same round, so every enemy tail can strike
+/// like a head. A tail here is an enemy segment no segment in sight points at
+/// (the rest of the body may be out of sight), unless it is within two
+/// segments of its head (a dragon shorter than 4 cannot split).
+constexpr int kFarFromEnemies = 5;
+
+inline std::array<uint8_t, kTiles> EnemyDistance(View const& view)
+{
+    std::array<uint8_t, kTiles> dist;
+    dist.fill(kFarFromEnemies);
+    std::array<bool, kTiles> pointedAt{};
+    for (int tile = 0; tile < kTiles; tile++)
+    {
+        PartView const& part = view.mTiles[tile].mPart;
+        if (part.mId >= 0 && !part.mHead && part.mTeam != view.mTeam)
+        {
+            int const next = StepTarget(view, tile, part.mDir);
+            if (next >= 0 && view.mTiles[next].mPart.mId == part.mId)
+            {
+                pointedAt[next] = true;
+            }
+        }
+    }
+    std::array<uint8_t, kTiles> here;
+    std::array<int8_t, kTiles> queue;
+    for (int source = 0; source < kTiles; source++)
+    {
+        PartView const& part = view.mTiles[source].mPart;
+        if (part.mId < 0 || part.mTeam == view.mTeam)
+        {
+            continue;
+        }
+        int back = (part.mDir + 2) & 3;
+        if (!part.mHead)
+        {
+            if (pointedAt[source])
+            {
+                continue;
+            }
+            bool tooShort = false;
+            int at = source;
+            for (int i = 0; i < 2 && !tooShort; i++)
+            {
+                int const next = StepTarget(view, at, view.mTiles[at].mPart.mDir);
+                if (next < 0 || view.mTiles[next].mPart.mId != part.mId)
+                {
+                    break;
+                }
+                tooShort = view.mTiles[next].mPart.mHead;
+                at = next;
+            }
+            if (tooShort)
+            {
+                continue;
+            }
+            back = part.mDir;
+        }
+        here.fill(kFarFromEnemies);
+        int head = 0;
+        int tail = 0;
+        here[source] = 0;
+        queue[tail++] = static_cast<int8_t>(source);
+        while (head < tail)
+        {
+            int const at = queue[head++];
+            if (here[at] + 1 >= kFarFromEnemies || (at != source && view.mTiles[at].mPart.mId >= 0))
+            {
+                continue;
+            }
+            for (int dir = 0; dir < 4; dir++)
+            {
+                if (at == source && dir == back)
+                {
+                    continue;
+                }
+                int const next = StepTarget(view, at, dir);
+                if (next >= 0 && here[at] + 1 < here[next])
+                {
+                    here[next] = static_cast<uint8_t>(here[at] + 1);
+                    queue[tail++] = static_cast<int8_t>(next);
+                }
+            }
+        }
+        for (int tile = 0; tile < kTiles; tile++)
+        {
+            if (tile != source)
+            {
+                dist[tile] = std::min(dist[tile], here[tile]);
+            }
+        }
+    }
+    return dist;
+}
+
+/// EnemyDistance as how soon an enemy could strike each tile: 2 in one
+/// step, 1 in two (a sprint), 0 not on its next turn.
+inline std::array<uint8_t, kTiles> EnemyThreat(View const& view)
+{
+    std::array<uint8_t, kTiles> const dist = EnemyDistance(view);
+    std::array<uint8_t, kTiles> threat{};
+    for (int tile = 0; tile < kTiles; tile++)
+    {
+        threat[tile] = dist[tile] == 1 ? 2 : dist[tile] == 2 ? 1 : 0;
+    }
+    return threat;
 }
 
 // ---------------------------------------------------------------------------
@@ -815,14 +938,16 @@ class Survival
 // tiebreak (a dead queen has length 0). Of its level-1 moves that do not end
 // on another dragon's head, it keeps the first non-empty tier of: those it
 // can be sure of surviving its horizon after (Survival, which knows where its
-// whole body is from its Memory) that end where no enemy head is one step
-// away; those it can be sure of surviving; those that last longest. Besides
-// those it may shed two segments to grow its team (QueenMayShed). Only with
-// none of those moves may it split (which halves it, but it survives), and
-// only with no split either is it left level 1's choices. Every other
-// dragon keeps out of its queen's way at level 2: it does not end a move
-// beside the queen's head while it has another move (an ally there can be
-// all that walls the queen in).
+// whole body is from its Memory), else those that last longest, and of
+// those, the ones that end out of every enemy's reach on its next turn, else
+// out of one step's (EnemyThreat: heads, and the children enemies could split
+// off at their tails, which move in the round they are born). Besides those
+// it may shed two segments to grow its team (QueenMayShed). Only with none of
+// those moves may it split (which halves it, but it survives), and only with
+// no split either is it left level 1's choices. Every other dragon keeps out
+// of its queen's way at level 2: it does not end a move beside the queen's
+// head while it has another move (an ally there can be all that walls the
+// queen in).
 //
 // When a level would mask every action, the level below it is used, but a
 // dragon with nothing but fatal moves still avoids taking an ally with it.
@@ -844,6 +969,13 @@ struct MoveSight
     /// mLanding; 0 with no landing tile), and the head's tile now.
     std::array<uint8_t, kNumActions> mReach{};
     uint8_t mReachHere = 0;
+    /// The same with enemy split children counted (EnemyThreat), and how many
+    /// steps the nearest enemy (or child) needs to get there (EnemyDistance,
+    /// kFarFromEnemies with no landing tile).
+    std::array<uint8_t, kNumActions> mThreat{};
+    uint8_t mThreatHere = 0;
+    std::array<uint8_t, kNumActions> mEnemyDistance{};
+    uint8_t mEnemyDistanceHere = 0;
     /// How many moves the dragon can be sure of after each move (Survival):
     /// mHorizon when some path lasts that long as far as it can tell; 0 for a
     /// move that is visibly fatal or a trade, 1 for one that ends out of sight
@@ -931,6 +1063,15 @@ inline MoveSight LookAhead(View const& view, Memory const* memory = nullptr)
         sight.mReach[a] = sight.mLanding[a] >= 0 ? reach[sight.mLanding[a]] : 0;
     }
     sight.mReachHere = reach[kHeadTile];
+    std::array<uint8_t, kTiles> const distance = EnemyDistance(view);
+    auto const threatAt = [](int d) { return static_cast<uint8_t>(d == 1 ? 2 : d == 2 ? 1 : 0); };
+    for (int a = 0; a < kSplitAction; a++)
+    {
+        sight.mEnemyDistance[a] = sight.mLanding[a] >= 0 ? distance[sight.mLanding[a]] : kFarFromEnemies;
+        sight.mThreat[a] = threatAt(sight.mEnemyDistance[a]);
+    }
+    sight.mEnemyDistanceHere = distance[kHeadTile];
+    sight.mThreatHere = threatAt(sight.mEnemyDistanceHere);
 
     if (!IsQueen(view.mId))
     {
@@ -1004,10 +1145,11 @@ inline bool SplitLegal(View const& view)
 
 /// The queen may shed two segments to grow its team while it stays long:
 /// from length 6, before round 350 (late on, length is what counts), and not
-/// with an enemy head one step from where it stays.
+/// with an enemy (or a child an enemy could split off) one step from where it
+/// stays.
 inline bool QueenMayShed(View const& view, MoveSight const& sight)
 {
-    return view.mLength >= 6 && view.mRound < 350 && sight.mReachHere < 2;
+    return view.mLength >= 6 && view.mRound < 350 && sight.mThreatHere < 2;
 }
 
 /// A dragon may dissolve where its queen can eat it: beside or a step from
@@ -1086,15 +1228,26 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
                 longest = std::max<int>(longest, sight.mSurvive[a]);
             }
         }
-        for (int t = 0; t < 3 && !chosen; t++)
+        // Those that survive the horizon, else those that last longest; of
+        // them, those that end out of every enemy's reach (and the reach of
+        // the children enemies could split off), else out of one step's.
+        for (int t = 0; t < 2 && !chosen; t++)
         {
+            int safest = 2;
             for (int a = 0; a < kSplitAction; a++)
             {
                 bool ok = strict[a] && sight.mHead[a] == kNoHead;
-                ok = ok && (t >= 2 ? sight.mSurvive[a] == longest : sight.mSurvive[a] >= sight.mHorizon);
-                ok = ok && (t >= 1 || sight.mReach[a] < 2);
+                ok = ok && (t == 1 ? sight.mSurvive[a] == longest : sight.mSurvive[a] >= sight.mHorizon);
                 tier[a] = ok ? 1 : 0;
-                chosen = chosen || ok;
+                if (ok)
+                {
+                    safest = std::min<int>(safest, sight.mThreat[a]);
+                    chosen = true;
+                }
+            }
+            for (int a = 0; a < kSplitAction; a++)
+            {
+                tier[a] = tier[a] && sight.mThreat[a] == safest ? 1 : 0;
             }
         }
         if (!chosen && (strict[kSplitAction] || strict[kShedAction]))
@@ -1157,6 +1310,11 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 //           min(24) / 24
 //   54      its survival horizon, / 24
 //   55      its queen's head is within two steps (where dissolving feeds it)
+//   56..67  how close to an enemy move 0..11 ends, counting the children
+//           enemies could split off at their tails: 5 - EnemyDistance, / 4
+//           (1 one step from an enemy, 0.25 four, 0 five or more, and 0 if the
+//           move is visibly fatal, a trade, or ends out of sight)
+//   68      the same for the tile the head is on now
 //
 // New features are appended (planes after the planes, scalars after the
 // scalars), so a checkpoint for an older layout can be widened with zero
@@ -1164,7 +1322,7 @@ inline void Mask(View const& view, MoveSight const& sight, int level, uint8_t* o
 
 constexpr int kPlanes = 24;
 constexpr int kPlaneSize = kPlanes * kTiles;
-constexpr int kScalars = 56;
+constexpr int kScalars = 69;
 constexpr int kObsSize = kPlaneSize + kScalars;
 
 constexpr int kPlanePearl = 0;
@@ -1229,7 +1387,8 @@ inline float FeatureScale(int feature)
     case 4:
         return 2.0f / kMaxRounds;
     default:
-        return feature - kPlaneSize >= 55   ? 1.0f
+        return feature - kPlaneSize >= 56   ? 0.25f
+               : feature - kPlaneSize >= 55 ? 1.0f
                : feature - kPlaneSize >= 51 ? 1.0f / 24.0f
                : feature - kPlaneSize >= 38 ? 0.5f
                                             : 1.0f;
@@ -1337,6 +1496,11 @@ inline void Encode(View const& view, MoveSight const& sight, uint8_t* out)
     }
     scalars[54] = sight.mHorizon;
     scalars[55] = sight.mFeedSpot;
+    for (int a = 0; a < kSplitAction; a++)
+    {
+        scalars[56 + a] = static_cast<uint8_t>(kFarFromEnemies - sight.mEnemyDistance[a]);
+    }
+    scalars[68] = static_cast<uint8_t>(kFarFromEnemies - sight.mEnemyDistanceHere);
 }
 
 inline void Encode(View const& view, uint8_t* out)

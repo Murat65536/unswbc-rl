@@ -589,6 +589,12 @@ class Brain
         return nb::make_tuple(std::vector<int>(mSight.mSurvive.begin(), mSight.mSurvive.end()), int(mSight.mHorizon));
     }
 
+    nb::tuple ThreatOf() const
+    {
+        Current();
+        return nb::make_tuple(std::vector<int>(mSight.mThreat.begin(), mSight.mThreat.end()), int(mSight.mThreatHere));
+    }
+
   private:
     core::Memory mMemory;
     core::View mView;
@@ -900,5 +906,8 @@ NB_MODULE(bccore, m)
         .def("decode", &Brain::DecodeAction, "action"_a, "The reply line an action makes this turn.")
         .def_prop_ro("body", &Brain::Body, "The dragon's body as it remembers it, head first.")
         .def_prop_ro("survival", &Brain::SurvivalOf, "(moves it can be sure of after each action, its horizon).")
+        .def_prop_ro("threat", &Brain::ThreatOf,
+                     "(how soon an enemy, or a child one could split off, could reach where each action ends, and "
+                     "the head's tile now: 2 in one step, 1 in two, 0 out of reach; core::EnemyThreat).")
         .def("copy", [](Brain const& self) { return Brain(self); });
 }

@@ -1,8 +1,10 @@
 """Scores checkpoints natively, fast: the actor plays greedily (as the bot
-does) in the batched environment against a scripted player, every game slot
+does) in the batched environment against a scripted player or another
+checkpoint (greedy too), every game slot
 at once, and this reports wins and how its queen fared.
 
     python -m rl.eval_env checkpoints/run6/ckpt_000260.pt checkpoints/run6/latest.pt --opponent careful
+    python -m rl.eval_env checkpoints/run6/latest.pt --opponent models/rl_bot_v5.pt
 
 It uses the environment's own levels (generated maps, and the official ones
 with --official-maps), so it is a quick way to compare checkpoints before
@@ -34,7 +36,9 @@ def load(path: str) -> tuple[Actor, int]:
 
 
 @torch.no_grad()
-def score(actor: Actor, options: dict, games: int, slots: int, seed: int) -> dict:
+def score(actor: Actor, options: dict, games: int, slots: int, seed: int, opponent: Actor | None = None) -> dict:
+    """With an opponent actor, it plays the other team (greedily too) instead
+    of the scripted player: team A in a slot's even games, B in its odd ones."""
     env = bccore.BatchEnv(slots, seed, options)
     obs = np.zeros((slots, bccore.OBS_SIZE), np.uint8)
     mask = np.zeros((slots, bccore.NUM_ACTIONS), np.uint8)
@@ -47,19 +51,27 @@ def score(actor: Actor, options: dict, games: int, slots: int, seed: int) -> dic
     # short ones, and every checkpoint plays the same levels.
     quota = -(-games // slots)
     done = [[] for _ in range(slots)]
+    played = np.ones(slots, np.int64)  # the environment counts a slot's games from 1
     while any(len(d) < quota for d in done):
-        logits = masked_logits(actor(torch.from_numpy(obs)), torch.from_numpy(mask))
-        out = env.step(logits.argmax(1).to(torch.int32).numpy(), obs, mask, priv, prev_row, prev_reward, info)
+        action = masked_logits(actor(torch.from_numpy(obs)), torch.from_numpy(mask)).argmax(1)
+        if opponent is not None:
+            theirs = torch.from_numpy(info[:, 1] != (np.arange(slots) + info[:, 3]) % 2)
+            if theirs.any():
+                action[theirs] = masked_logits(opponent(torch.from_numpy(obs[theirs.numpy()])),
+                                               torch.from_numpy(mask[theirs.numpy()])).argmax(1)
+        out = env.step(action.to(torch.int32).numpy(), obs, mask, priv, prev_row, prev_reward, info)
         e = out["episodes"]
         for i in range(len(e["slot"])):
             slot = int(e["slot"][i])
+            learner = (slot + played[slot]) % 2 if opponent is not None else 1 - e["scripted_team"][i].item()
+            played[slot] += 1
             if len(done[slot]) < quota:
-                done[slot].append({k: e[k][i].item() for k in e})
+                done[slot].append({k: e[k][i].item() for k in e} | {"learner": int(learner)})
     episodes = [e for d in done for e in d]
     wins = draws = alive = splits = 0
     causes, deciders = Counter(), Counter()
     for e in episodes:
-        learner = 1 - e["scripted_team"]
+        learner = e["learner"]
         side = "ab"[learner]
         wins += e["outcome"] == learner
         draws += e["outcome"] == 2
@@ -79,7 +91,7 @@ def score(actor: Actor, options: dict, games: int, slots: int, seed: int) -> dic
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("checkpoints", nargs="+")
-    p.add_argument("--opponent", choices=("careful", "random"), default="careful")
+    p.add_argument("--opponent", default="careful", help="careful, random, or a checkpoint to play against")
     p.add_argument("--games", type=int, default=512, help="at least this many (a whole number per slot)")
     p.add_argument("--slots", type=int, default=256)
     p.add_argument("--official-maps", type=float, default=0.3)
@@ -88,14 +100,17 @@ def main():
     p.add_argument("--threads", type=int, default=0)
     args = p.parse_args()
 
+    scripted = args.opponent in ("careful", "random")
+    opponent = None if scripted else load(args.opponent)[0]
     for path in args.checkpoints:
         actor, level = load(path)
-        options = {"scripted_frac": 1.0, "scripted_careful": 1.0 if args.opponent == "careful" else 0.0,
+        options = {"scripted_frac": 1.0 if scripted else 0.0,
+                   "scripted_careful": 1.0 if args.opponent == "careful" else 0.0,
                    "mask_level": level if args.mask_level is None else args.mask_level, "threads": args.threads}
         if args.official_maps > 0:
             options["maps"] = official_maps()
             options["map_prob"] = args.official_maps
-        r = score(actor, options, args.games, args.slots, args.seed)
+        r = score(actor, options, args.games, args.slots, args.seed, opponent)
         deaths = ", ".join(f"{k} {v:.2f}" for k, v in r["deaths"].items())
         decided = ", ".join(f"{k} {v:.2f}" for k, v in r["decided"].items() if v)
         print(f"{path} vs {args.opponent} (mask level {options['mask_level']}, {r['games']} games): "
