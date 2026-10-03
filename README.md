@@ -61,7 +61,8 @@ version of the same network.
     54 (+200);
   - beats the toolkit's random starter in all 108 games on the 15 official
     maps and 12 generated ones, both sides, two seeds;
-  - beats the careful scripted player in 44 of 54 (v5: 48, v4: 39, v3: 43).
+  - beats the careful scripted player in 44 of 54 (v5: 48, v4: 39, v3: 43) and
+    over|yonder's tactics-bot in 48 of 54, drawing 2 (v5: 49, drawing 2).
 
   Its queen dies in 15 of the 108 games against the starter (v5: 14, v3:
   28), 12 of them by round 9 on the three maps where each queen starts in a
