@@ -67,6 +67,10 @@ def parse_args(argv=None):
     league.add_argument("--league-size", type=int, default=10)
     league.add_argument("--snapshot-every", type=int, default=25)
     league.add_argument("--opponent-every", type=int, default=5)
+    league.add_argument("--league-anchor", type=float, default=0.0,
+                        help="chance the league opponent is the anchor: the actor the run started from (--init-from or "
+                             "--anchor), kept for the whole run, so the learner cannot drift into beating only itself")
+    league.add_argument("--anchor", default=None, help="a checkpoint whose actor is the anchor (default: --init-from's)")
     league.add_argument("--scripted-frac", type=float, default=0.0,
                         help="share of game slots (the last ones) where one team is a scripted random-safe player")
     league.add_argument("--scripted-careful", type=float, default=0.0,
@@ -115,6 +119,11 @@ def main(argv=None):
 
         init_from(trainer, torch.load(args.init_from, map_location="cpu", weights_only=False))
         print(f"initialised from {args.init_from}")
+    if args.anchor:
+        from .warm_start import anchor_from
+
+        anchor_from(trainer, torch.load(args.anchor, map_location="cpu", weights_only=False))
+        print(f"anchored to {args.anchor}")
 
     writer = None
     log_file = None

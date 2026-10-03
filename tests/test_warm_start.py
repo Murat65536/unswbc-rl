@@ -88,3 +88,23 @@ def test_a_trainer_starts_from_an_older_checkpoint():
     assert trainer.snapshots[0]["layers.0.weight"].shape[1] == bccore.OBS_SIZE
     stats = trainer.iterate()
     assert stats["iteration"] == 1
+
+
+def test_the_anchor_is_the_actor_a_run_started_from():
+    args = small_args(league_frac=0.5, league_anchor=1.0)
+    torch.manual_seed(5)
+    old = Actor(len(WHERE), OLD_ACTIONS, old_scales(), tuple(args.hidden))
+    critic = Critic(len(WHERE), bccore.NUM_PRIVILEGED, old_scales(), tuple(args.critic_hidden))
+    state = {"actor": old.state_dict(), "critic": critic.state_dict(), "hidden": list(args.hidden),
+             "obs_size": len(WHERE), "qat": False, "snapshots": []}
+    trainer = Trainer(args)
+    init_from(trainer, state)
+    for _ in range(args.opponent_every):
+        trainer.iterate()
+    # The learner has moved on, but with --league-anchor 1 its league
+    # opponent is still the starting actor.
+    codes = random_codes(32, seed=6)
+    with torch.no_grad():
+        old.eval()
+        assert torch.allclose(trainer.opponent(codes)[:, :OLD_ACTIONS], old(codes[:, WHERE]), atol=1e-5)
+    assert trainer.state_dict()["anchor"] is trainer.anchor

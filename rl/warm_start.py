@@ -88,3 +88,10 @@ def init_from(trainer, state: dict):
     trainer.critic.load_state_dict(widen_critic(state["critic"], where))
     trainer.actor.qat = bool(state.get("qat", False))
     trainer.snapshots = [widen_actor(s, where) for s in state.get("snapshots", [])]
+    trainer.anchor = widen_actor(state["actor"], where)
+
+
+def anchor_from(trainer, state: dict):
+    """Makes a checkpoint's actor, widened to the current observation, the
+    trainer's anchor (--anchor)."""
+    trainer.anchor = widen_actor(state["actor"], index_map(layout(state), (bccore.NUM_PLANES, bccore.NUM_SCALARS)))

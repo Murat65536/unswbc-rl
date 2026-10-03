@@ -130,6 +130,8 @@ class Trainer:
         if self.league_slots + int(round(n * args.scripted_frac)) > n:
             raise ValueError("--league-frac and --scripted-frac together exceed the slots")
         self.snapshots: list[dict] = []
+        # A fixed opponent for the whole run (--league-anchor), as a state dict.
+        self.anchor: dict | None = None
         self.opponent = None
 
         self.rollout = Rollout(args.rollout, n)
@@ -427,13 +429,17 @@ class Trainer:
         if self.iteration % args.snapshot_every == 0:
             self.snapshots.append(copy.deepcopy(self.actor.state_dict()))
             self.snapshots = self.snapshots[-args.league_size:]
-        if self.snapshots and self.iteration % args.opponent_every == 0:
-            # Recent snapshots more often than old ones.
-            k = len(self.snapshots)
-            weights = np.arange(1, k + 1, dtype=np.float64)
-            pick = int(self.rng.choice(k, p=weights / weights.sum()))
+        anchored = self.anchor is not None and args.league_anchor > 0
+        if (self.snapshots or anchored) and self.iteration % args.opponent_every == 0:
+            if anchored and (not self.snapshots or self.rng.random() < args.league_anchor):
+                chosen = self.anchor
+            else:
+                # Recent snapshots more often than old ones.
+                k = len(self.snapshots)
+                weights = np.arange(1, k + 1, dtype=np.float64)
+                chosen = self.snapshots[int(self.rng.choice(k, p=weights / weights.sum()))]
             opponent = Actor(OBS, ACTIONS, bccore.feature_scales(), tuple(args.hidden)).to(self.device)
-            opponent.load_state_dict(self.snapshots[pick])
+            opponent.load_state_dict(chosen)
             opponent.qat = self.actor.qat
             opponent.eval()
             self.opponent = opponent
@@ -501,6 +507,7 @@ class Trainer:
             "qat": self.actor.qat,
             "hidden": list(self.actor.hidden),
             "snapshots": self.snapshots,
+            "anchor": self.anchor,
             "plr": self.plr.state_dict() if self.plr is not None else None,
             "args": vars(self.args),
             "obs_size": OBS,
@@ -518,6 +525,7 @@ class Trainer:
         self.decisions = state.get("decisions", 0)
         self.actor.qat = state.get("qat", False)
         self.snapshots = state.get("snapshots", [])
+        self.anchor = state.get("anchor")
         if self.plr is not None and state.get("plr"):
             self.plr.load_state_dict(state["plr"])
 
