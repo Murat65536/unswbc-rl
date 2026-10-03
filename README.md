@@ -49,22 +49,25 @@ version of the same network.
   metered sandbox: same observation, same action. A turn costs about 4.1M
   of the 100M points (2.5M of that is the single write), 0.6 MB of memory,
   and the zip is about 460 KB.
-- **Strength.** `bots/rl_bot_v5` (v3's weights widened to the current
+- **Strength.** `bots/rl_bot_v6` (v3's weights widened to the current
   observation and actions, then two runs of 350 iterations at mask level 2,
   about 23M decisions each: one with memory, the survival search and giving
-  way, exported as `bots/rl_bot_v4`, then one with shed and dissolve;
-  `models/rl_bot_v5.pt`) in the judge's sandbox, with no bot errors:
-  - beats v3 in 114 of 162 games head to head (+150 Elo, 95% interval
-    +95 to +214; the SPRT for +30 accepts) and v4 in 41 of 54 (+200);
+  way, exported as `bots/rl_bot_v4`, then one with shed and dissolve,
+  exported as `bots/rl_bot_v5`; then 20 iterations with the enemy-reach
+  shield and its scalars and a league anchored to v5; `models/rl_bot_v6.pt`)
+  in the judge's sandbox, with no bot errors:
+  - beats v5 in 192 of 324 games head to head, drawing 6 (+72 Elo, 95%
+    interval +34 to +111); v5 beat v3 in 114 of 162 (+150) and v4 in 41 of
+    54 (+200);
   - beats the toolkit's random starter in all 108 games on the 15 official
     maps and 12 generated ones, both sides, two seeds;
-  - beats the careful scripted player in 48 of 54 (v4: 39, v3: 43) and
-    over|yonder's tactics-bot in 49 of 54, drawing 2 (v4: 49, no draws).
+  - beats the careful scripted player in 44 of 54 (v5: 48, v4: 39, v3: 43).
 
-  Its queen dies in 14 of the 108 games against the starter (v3: 28), 12
-  of them by round 9 on the three maps where each queen starts in a dead
-  end. `bots/rl_bot_v4`, `bots/rl_bot_v3`, `bots/rl_bot_v2` and the earlier
-  NumPy `bots/rl_bot_v1` are kept as baselines.
+  Its queen dies in 15 of the 108 games against the starter (v5: 14, v3:
+  28), 12 of them by round 9 on the three maps where each queen starts in a
+  dead end. `bots/rl_bot_v5`, `bots/rl_bot_v4`, `bots/rl_bot_v3`,
+  `bots/rl_bot_v2` and the earlier NumPy `bots/rl_bot_v1` are kept as
+  baselines.
 
 ## Setup
 
@@ -94,28 +97,35 @@ python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0
     --kelp 0.0 0.25 --scripted-frac 0.35 --scripted-careful 0.6 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
-# models/rl_bot_v5.pt is the checkpoint bots/rl_bot_v5 was exported from (run
-# with the flags above for 350 iterations, --init-from v4's checkpoint): actor,
-# critic, optimizer, league and level replay. Continue it with the same flags
-# plus --resume models/rl_bot_v5.pt and a larger --iterations (keep --games
-# 1024: changing it across a resume is untested). models/rl_bot_v3.pt is v3's.
+# models/rl_bot_v6.pt is the checkpoint bots/rl_bot_v6 was exported from (run
+# with the flags above plus --init-from models/rl_bot_v5.pt --league-anchor 0.5,
+# iteration 20): actor, critic, optimizer, league, anchor and level replay.
+# Continue one with the same flags plus --resume and a larger --iterations
+# (keep --games 1024: changing it across a resume is untested).
+# models/rl_bot_v5.pt and models/rl_bot_v3.pt are v5's and v3's.
+#
+# Runs from v5 peak early: against v5, natively, run11 (the v6 run) won 0.62
+# at iteration 20, 0.55 at 60, 0.52 at 100 and 0.41 at 160. Without the
+# anchor (run10) it fell faster (0.42 at 100, 0.25 at 200). Score checkpoints
+# against the bot you start from and keep the best, not the last:
+python -m rl.eval_env checkpoints/run1/ckpt_000020.pt --opponent models/rl_bot_v5.pt
 
 # Compare checkpoints quickly, natively, against the careful scripted player:
 python -m rl.eval_env checkpoints/run1/ckpt_000500.pt checkpoints/run1/latest.pt --opponent careful
 
 # Export the actor as a C++ bot and run the export gate (native + judge sandbox):
-python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v6
+python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v7
 
 # Play it in the judge's sandbox, both sides of the official and generated maps,
 # against the random starter, the careful player, or another bot:
-python -m export.evaluate --bot bots/rl_bot_v6 --generated 12
-python -m export.evaluate --bot bots/rl_bot_v6 --opponent careful --generated 12
+python -m export.evaluate --bot bots/rl_bot_v7 --generated 12
+python -m export.evaluate --bot bots/rl_bot_v7 --opponent careful --generated 12
 # Or decide whether a new version beats an old one (SPRT, Elo bounds 0 and 30):
-python -m export.evaluate --bot bots/rl_bot_v6 --opponent bots/rl_bot_v5 --sprt 0 30
+python -m export.evaluate --bot bots/rl_bot_v7 --opponent bots/rl_bot_v6 --sprt 0 30
 
 # The toolkit's own commands work too:
-unswbc run maps/arena.map bots/rl_bot_v5 bots/rl_bot_v5 --sandbox -v
-unswbc submit bots/rl_bot_v5 -n rl-v5 -d "PPO self-play, C++ int8, queen shield"
+unswbc run maps/arena.map bots/rl_bot_v6 bots/rl_bot_v6 --sandbox -v
+unswbc submit bots/rl_bot_v6 -n rl-v6 -d "PPO self-play, C++ int8, queen shield"
 ```
 
 ## How it works
@@ -201,7 +211,9 @@ says so, open rows carry into the next rollout, GAE runs along each dragon's
 own decisions. The actor is an MLP on the observation codes trained
 quantisation-aware (int8 weights, uint8 activations); the critic is separate
 and privileged. A share of game slots pit the learner against frozen
-snapshots (a league), another share against a scripted random-safe player
+snapshots (a league; `--league-anchor` makes the run's starting actor the
+opponent some of the time, so the learner can't drift into beating only its
+recent selves), another share against a scripted random-safe player
 played inside the environment (`--scripted-frac`; self-play alone never
 punished losing the queen early, since both sides did it), and Prioritized
 Level Replay picks levels. The log follows the learner's queen: how often
@@ -238,7 +250,7 @@ each game, and with `--sprt` runs a sequential test between two versions.
   observation and actions do not use them yet.
 - **The queen still gets cornered sometimes.** Memory, the survival search
   and allies giving way cut it from 42% of games against the careful player
-  to about 20% (with v3's weights; v5's queen dies in 12 of 54). What is
+  to about 20% (with v3's weights; v6's queen dies in 10 of 54). What is
   left is mostly crowds: enemy and allied bodies closing in between the
   queen's turns, which a search with everyone else frozen cannot foresee.
   The memory keeps only the body; a remembered map (kelp, portals, pearls)
