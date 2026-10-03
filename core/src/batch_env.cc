@@ -332,6 +332,11 @@ namespace {
 ControllerReply ReplyFor(Command const& command)
 {
     ControllerReply reply;
+    if (command.mDissolve)
+    {
+        reply.mAction = ActionSuicide{};
+        return reply;
+    }
     if (command.mSplit)
     {
         reply.mAction = ActionSplit{command.mSplitSize};
@@ -364,7 +369,13 @@ void BatchEnv::PlayScripted(Slot& slot)
     };
     if (slot.mCareful)
     {
-        int const action = CarefulAction(slot.mView, CarefulNoise(slot.mScriptRng[id]));
+        if (id >= static_cast<int>(slot.mAgents.size()))
+        {
+            slot.mAgents.resize(id + 1);
+        }
+        Memory& memory = slot.mAgents[id].mMemory;
+        memory.Update(slot.mView);
+        int const action = CarefulAction(slot.mView, CarefulNoise(slot.mScriptRng[id]), &memory);
         TakeTurn(slot, ReplyFor(Decode(slot.mView, action)));
         return;
     }
@@ -442,19 +453,20 @@ void BatchEnv::Decide(Slot& slot, int index, DecisionOut const& out)
     DragonId const id = *slot.mGame->CurrentDragon();
     Dragon const& dragon = state.mDragons[id];
 
+    if (id >= static_cast<int>(slot.mAgents.size()))
+    {
+        slot.mAgents.resize(id + 1);
+    }
+    Agent& agent = slot.mAgents[id];
     ViewFromState(state, dragon, slot.mView);
-    MoveSight const sight = LookAhead(slot.mView);
+    agent.mMemory.Update(slot.mView);
+    MoveSight const sight = LookAhead(slot.mView, &agent.mMemory);
     Encode(slot.mView, sight, out.mObs + static_cast<size_t>(index) * kObsSize);
     Mask(slot.mView, sight, mConfig.mMaskLevel, out.mMask + static_cast<size_t>(index) * kNumActions);
     Standings const standings = StandingsFor(state, dragon.mTeam);
     PrivilegedFeatures(state, dragon, standings, out.mPrivileged + static_cast<size_t>(index) * kPrivileged);
 
     float const phi = Phi(standings);
-    if (id >= static_cast<int>(slot.mAgents.size()))
-    {
-        slot.mAgents.resize(id + 1);
-    }
-    Agent& agent = slot.mAgents[id];
     int64_t const row = mStep * NumGames() + index;
     if (agent.mLastRow >= 0)
     {
@@ -515,12 +527,15 @@ void BatchEnv::FinishGame(Slot& slot, int index, bool truncated)
             {
                 done.mBoot = static_cast<int32_t>(slot.mBootObs.size() / kObsSize);
                 ViewFromState(state, dragon, slot.mView);
+                Memory memory = agent.mMemory;
+                memory.Update(slot.mView);
+                MoveSight const sight = LookAhead(slot.mView, &memory);
                 size_t const at = slot.mBootObs.size();
                 slot.mBootObs.resize(at + kObsSize);
-                Encode(slot.mView, slot.mBootObs.data() + at);
+                Encode(slot.mView, sight, slot.mBootObs.data() + at);
                 size_t const maskAt = slot.mBootMask.size();
                 slot.mBootMask.resize(maskAt + kNumActions);
-                Mask(slot.mView, mConfig.mMaskLevel, slot.mBootMask.data() + maskAt);
+                Mask(slot.mView, sight, mConfig.mMaskLevel, slot.mBootMask.data() + maskAt);
                 size_t const privAt = slot.mBootPrivileged.size();
                 slot.mBootPrivileged.resize(privAt + kPrivileged);
                 PrivilegedFeatures(state, dragon, StandingsFor(state, dragon.mTeam),

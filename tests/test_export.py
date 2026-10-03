@@ -79,21 +79,22 @@ def test_the_careful_bot_plays_as_the_environment_does(tmp_path):
     for text, seed in gate_maps(6, seed=3):
         match = bccore.Match(text, seed)
         match.begin()
-        dragons = {}  # id -> [init block, round blocks, replies, generator state]
+        dragons = {}  # id -> [init block, round blocks, replies, generator state, brain]
         for _ in range(600):
             did = match.current()
             if did is None:
                 break
             if did not in dragons:
-                dragons[did] = [match.init_block(did), [], [], bccore.CAREFUL_SEED]
+                dragons[did] = [match.init_block(did), [], [], bccore.CAREFUL_SEED, bccore.Brain()]
             d = dragons[did]
             block = match.round_block(did)
             noise, d[3] = bccore.careful_noise(d[3])
-            reply = bccore.decode_action(d[0], block, bccore.careful_action(d[0], block, noise))
+            d[4].observe(d[0], block)
+            reply = d[4].decode(d[4].careful(noise))
             d[1].append(block)
             d[2].append(reply)
             match.reply(reply + "\nENDTURN\n")
-        for init, blocks, replies, _ in dragons.values():
+        for init, blocks, replies, _, _ in dragons.values():
             text_out = subprocess.run([str(binary)], input=(init + "".join(blocks)).encode(), capture_output=True,
                                       check=True).stdout.decode()
             assert [line for line in text_out.split("\n") if line and line != "ENDTURN"] == replies

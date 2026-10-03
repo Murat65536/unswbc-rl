@@ -345,6 +345,10 @@ class Match
         core::View view;
         core::ViewFromState(copy, dragon, view);
         core::Command const command = core::Decode(view, action);
+        if (command.mDissolve)
+        {
+            return true;
+        }
         if (command.mSplit)
         {
             Split(copy, dragon, command.mSplitSize, {});
@@ -524,6 +528,80 @@ core::EnvConfig ConfigFrom(nb::dict const& options)
 }
 
 /// The environment, writing into arrays the caller owns (numpy or torch).
+/// One dragon's process as far as features go: its Memory across its turns,
+/// and what it works out each turn, exactly as the bot (and the training
+/// environment) does.
+class Brain
+{
+  public:
+    nb::tuple Observe(core::View view)
+    {
+        mView = std::move(view);
+        mMemory.Update(mView);
+        mSight = core::LookAhead(mView, &mMemory);
+        mObserved = true;
+        std::vector<uint8_t> obs(core::kObsSize);
+        core::Encode(mView, mSight, obs.data());
+        std::vector<uint8_t> masks(core::kMaskLevels * core::kNumActions);
+        for (int level = 0; level < core::kMaskLevels; level++)
+        {
+            core::Mask(mView, mSight, level, masks.data() + level * core::kNumActions);
+        }
+        return nb::make_tuple(ToNumpy(std::move(obs)), ToNumpy2(std::move(masks), core::kNumActions));
+    }
+
+    core::View const& Current() const
+    {
+        if (!mObserved)
+        {
+            throw nb::value_error("observe a turn first");
+        }
+        return mView;
+    }
+
+    int Careful(uint32_t noise) const
+    {
+        return core::CarefulAction(Current(), noise, &mMemory);
+    }
+
+    std::string DecodeAction(int action) const
+    {
+        if (action < 0 || action >= core::kNumActions)
+        {
+            throw nb::value_error("no such action");
+        }
+        return core::FormatCommand(core::Decode(Current(), action));
+    }
+
+    std::vector<std::pair<int, int>> Body() const
+    {
+        std::vector<std::pair<int, int>> out;
+        for (core::Cell const& cell : mMemory.mBody)
+        {
+            out.emplace_back(cell.mX, cell.mY);
+        }
+        return out;
+    }
+
+    nb::tuple SurvivalOf() const
+    {
+        Current();
+        return nb::make_tuple(std::vector<int>(mSight.mSurvive.begin(), mSight.mSurvive.end()), int(mSight.mHorizon));
+    }
+
+    nb::tuple ThreatOf() const
+    {
+        Current();
+        return nb::make_tuple(std::vector<int>(mSight.mThreat.begin(), mSight.mThreat.end()), int(mSight.mThreatHere));
+    }
+
+  private:
+    core::Memory mMemory;
+    core::View mView;
+    core::MoveSight mSight;
+    bool mObserved = false;
+};
+
 class PyBatchEnv
 {
   public:
@@ -728,13 +806,8 @@ NB_MODULE(bccore, m)
         "features_from_blocks",
         [](std::string const& init, std::string const& round) { return Features(ViewFromBlocks(init, round)); },
         "init"_a, "round_block"_a,
-        "(observation, masks) from the protocol text, as the bot computes them; masks[level] is that level's.");
-    m.def(
-        "careful_action",
-        [](std::string const& init, std::string const& round, uint32_t noise) {
-            return core::CarefulAction(ViewFromBlocks(init, round), noise);
-        },
-        "init"_a, "round_block"_a, "noise"_a, "The careful scripted player's action (core/careful.h).");
+        "(observation, masks) from the protocol text, as a dragon's first turn would compute them (no memory "
+        "yet); masks[level] is that level's. Brain keeps the memory across turns.");
     m.def(
         "careful_noise",
         [](uint64_t state) {
@@ -804,7 +877,7 @@ NB_MODULE(bccore, m)
         .def("probe", &Match::Probe, "action"_a,
              "Whether the current dragon would die this turn taking this action (played on a copy).")
         .def("features", [](Match const& self, int id) { return Features(self.ViewOf(id)); }, "id"_a,
-             "(observation, level-0 mask, level-1 mask) from the engine's state, as training computes them.")
+             "(observation, masks) from the engine's state, as on a dragon's first turn (no memory yet).")
         .def(
             "view_difference",
             [](Match const& self, int id) {
@@ -815,4 +888,26 @@ NB_MODULE(bccore, m)
         .def_prop_ro("width", [](Match const& self) { return self.State().mWidth; })
         .def_prop_ro("height", [](Match const& self) { return self.State().mHeight; })
         .def_prop_ro("unit_limit", [](Match const& self) { return self.State().mUnitLimit; });
+
+    nb::class_<Brain>(m, "Brain",
+                      "One dragon's process: its memory across its turns, and the observation and masks it works "
+                      "out each turn, as the bot and the training environment do. Feed it every turn of one dragon.")
+        .def(nb::init<>())
+        .def(
+            "observe",
+            [](Brain& self, std::string const& init, std::string const& round) {
+                return self.Observe(ViewFromBlocks(init, round));
+            },
+            "init"_a, "round_block"_a, "This turn's (observation, masks) from the protocol text.")
+        .def(
+            "observe_match", [](Brain& self, Match const& match, int id) { return self.Observe(match.ViewOf(id)); },
+            "match"_a, "id"_a, "This turn's (observation, masks) from the engine's state, as training computes them.")
+        .def("careful", &Brain::Careful, "noise"_a, "The careful player's action this turn (core/careful.h).")
+        .def("decode", &Brain::DecodeAction, "action"_a, "The reply line an action makes this turn.")
+        .def_prop_ro("body", &Brain::Body, "The dragon's body as it remembers it, head first.")
+        .def_prop_ro("survival", &Brain::SurvivalOf, "(moves it can be sure of after each action, its horizon).")
+        .def_prop_ro("threat", &Brain::ThreatOf,
+                     "(how soon an enemy, or a child one could split off, could reach where each action ends, and "
+                     "the head's tile now: 2 in one step, 1 in two, 0 out of reach; core::EnemyThreat).")
+        .def("copy", [](Brain const& self) { return Brain(self); });
 }

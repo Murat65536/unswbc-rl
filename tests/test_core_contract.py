@@ -71,22 +71,60 @@ def games():
 GAMES = list(games())
 
 
+class Brains:
+    """Each dragon's Brain (its process's memory), fed every turn, from the
+    engine's state as training builds it."""
+
+    def __init__(self):
+        self.brains = {}
+
+    def observe(self, match, did):
+        return self.brains.setdefault(did, bccore.Brain()).observe_match(match, did)
+
+
 @pytest.mark.parametrize("label,text,seed,styles", GAMES, ids=[game[0] for game in GAMES])
 def test_training_view_equals_bot_view(label, text, seed, styles):
+    """Turn by turn, the View built from the state equals the one parsed from
+    the blocks; and each dragon's Brain, fed one way or the other, remembers
+    the same and computes the same observation and masks."""
+    ours, bots = Brains(), {}
     turns = 0
 
     def check(match, did, init, block):
         nonlocal turns
         difference = match.view_difference(did)
         assert difference is None, f"{label}: dragon {did}: {difference}"
-        ours = match.features(did)
-        bots = bccore.features_from_blocks(init, block)
-        for a, b in zip(ours, bots):
-            assert np.array_equal(a, b)
+        a = ours.observe(match, did)
+        bot = bots.setdefault(did, bccore.Brain())
+        b = bot.observe(init, block)
+        for x, y in zip(a, b):
+            assert np.array_equal(x, y)
+        assert ours.brains[did].body == bot.body
         turns += 1
 
     play_stepwise(text, seed, styles, check)
     assert turns > 0
+
+
+def test_memory_of_the_body_is_never_wrong():
+    """What a dragon remembers of its body is always its real body, head
+    first, and soon all of it: a body trails the head's path."""
+    brains = Brains()
+    stats = {"turns": 0, "whole": 0, "beyond_window": 0}
+
+    def check(match, did, init, block):
+        brains.observe(match, did)
+        remembered = brains.brains[did].body
+        body = [tuple(cell) for cell in match.dragons()[did][4]]
+        assert remembered == body[:len(remembered)], (did, remembered, body)
+        stats["turns"] += 1
+        stats["whole"] += len(remembered) == len(body)
+        head = body[0]
+        stats["beyond_window"] += any(max(abs(x - head[0]), abs(y - head[1])) > 3 for x, y in remembered)
+
+    for label, text, seed, styles in GAMES:
+        play_stepwise(text, seed, styles, check)
+    assert stats["whole"] > 0.9 * stats["turns"] and stats["beyond_window"] > 100, stats
 
 
 def test_masks_never_hide_a_move_that_survives():
@@ -95,14 +133,13 @@ def test_masks_never_hide_a_move_that_survives():
     board). Level 2 only narrows a queen's level-1 choices (its shield), and
     lets it split only with no move left."""
     stats = {"masked0": 0, "masked1": 0, "shielded": 0, "unmasked_fatal": 0, "turns": 0}
+    brains = Brains()
 
     def check(match, did, init, block):
-        _, (mask0, mask1, mask2) = match.features(did)
+        _, (mask0, mask1, mask2) = brains.observe(match, did)
         assert mask0.any() and mask1.any() and mask2.any()
-        if did > 1:
-            assert (mask2 == mask1).all()
-        else:
-            assert (mask2 <= mask1).all()
+        assert (mask2 <= mask1).all()
+        if did <= 1:
             assert not (mask2[12] and mask2[:12].any()), f"the queen may split only with no move left\n{block}"
         for action in range(bccore.NUM_ACTIONS):
             if not mask0[action]:
@@ -118,6 +155,7 @@ def test_masks_never_hide_a_move_that_survives():
         stats["turns"] += 1
 
     for label, text, seed, styles in GAMES:
+        brains.brains.clear()
         play_stepwise(text, seed, styles, check)
     assert stats["masked0"] > 100 and stats["masked1"] > 1000 and stats["shielded"] > 100, stats
 
@@ -126,11 +164,14 @@ def test_observation_codes_are_in_range():
     scales = bccore.feature_scales()
     seen_max = np.zeros(bccore.OBS_SIZE, dtype=np.int64)
 
+    brains = Brains()
+
     def check(match, did, init, block):
-        obs, _ = match.features(did)
+        obs, _ = brains.observe(match, did)
         np.maximum(seen_max, obs, out=seen_max)
 
     for label, text, seed, styles in GAMES[:6]:
+        brains.brains.clear()
         play_stepwise(text, seed, styles, check)
     assert (seen_max * scales <= 1.0 + 1e-6).all()
     assert seen_max[:SCALARS_AT].max() <= 32
@@ -191,6 +232,8 @@ def test_actions_decode_relative_to_the_facing():
                             "MOVE SS", "MOVE SW", "MOVE SE",
                             "MOVE NN", "MOVE NE", "MOVE NW"]
     assert decode[12] == "SPLIT 3"
+    assert decode[13] == "SPLIT 2"     # shed
+    assert decode[14] == ""            # dissolve: no action at all
 
 
 def test_level_zero_rules():
@@ -211,7 +254,7 @@ def test_level_zero_rules():
                                        ("A", [(2, 2), (2, 3)])], unit_limit=2), 0)
     m.begin()
     _, (mask0, _, _) = m.features(0)
-    assert mask0[12] == 0          # the unit limit is reached
+    assert mask0[12] == 0 and mask0[13] == 0  # the unit limit is reached
 
 
 def test_level_one_sees_through_a_visible_portal():
@@ -284,18 +327,54 @@ def test_head_trades_and_the_queen():
     assert mask1[split] == 1 and mask1[right] == 1
     assert mask2[forward] == 0     # the queen trades with nobody
     assert mask2[split] == 0       # and never splits while it has a move
-    assert mask2[right] == 1
-    # Right then left ends at (9, 9), one step from dragon 3's head: safe for
-    # now, but the queen's shield keeps it out of that reach.
+    # Right ends at (8, 9), which dragon 3 could sprint to via (9, 9); right
+    # then left at (9, 9), one step from its head. Both are safe for now, but
+    # the queen's shield keeps out of reach while it can: two steps right,
+    # then forward or right again, end where dragon 3 cannot get.
     right_then_left = 3 + 3 * 1 + 2
-    assert mask1[right_then_left] == 1 and not m.probe(right_then_left)
-    assert mask2[right_then_left] == 0
-    # The ally (2) faces south onto the queen's head: masked at level 1.
+    for a in (right, right_then_left):
+        assert mask1[a] == 1 and not m.probe(a)
+        assert mask2[a] == 0
+    assert [a for a in range(12) if mask2[a]] == [3 + 3 * 1 + 0, 3 + 3 * 1 + 1]
+    # The ally (2) faces south onto the queen's head: masked at level 1. Its
+    # other moves end diagonally from the queen's head, out of its way.
     _, (_, mask1, mask2) = m.features(2)
     assert mask1[forward] == 0 and (mask2 == mask1).all()
     # The enemy (3) faces west onto A's queen's head: a trade it may make.
     _, (_, mask1, mask2) = m.features(3)
     assert mask1[forward] == 1 and mask2[forward] == 1
+
+
+@pytest.mark.parametrize("enemy_length, threatened", [(4, True), (3, False)])
+def test_the_queen_keeps_away_from_enemy_tails(enemy_length, threatened):
+    # The queen faces east at (8, 8). An enemy lies along row 9 heading west,
+    # its tail at (9, 9): split, its tail becomes a child's head facing west,
+    # which moves later in the same round and could step onto (9, 8), where
+    # the queen's step forward ends, or (8, 9), where its step right does.
+    # Its head is too far to get there; a dragon of length 3 cannot split.
+    enemy = [(9 + enemy_length - 1 - i, 9) for i in range(enemy_length)]
+    m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 2), (14, 2)]),
+                                       ("B", enemy)]), 0)
+    m.begin()
+    brain = bccore.Brain()
+    obs, (_, mask1, mask2) = brain.observe_match(m, 0)
+    threat, _ = brain.threat
+    forward, right, left = 0, 1, 2
+    assert scalar(obs, 38 + forward) == 0 and scalar(obs, 38 + right) == 0   # no head's reach
+    assert threat[forward] == threat[right] == (2 if threatened else 0)
+    # The observation says how close: 5 - steps, the tail's child one step
+    # from (9, 8), or the head three.
+    assert scalar(obs, 56 + forward) == (4 if threatened else 2)
+    for a in (forward, right, left):
+        assert mask1[a] == 1 and not m.probe(a)
+    # With the tail a threat, the queen's shield keeps out of the child's
+    # reach: forward and right end one step from it, and every other move
+    # but these three within two: left to (8, 7), and two steps left, to
+    # (8, 6) or (7, 7). Without, all three single steps are fine.
+    if threatened:
+        assert [a for a in range(12) if mask2[a]] == [left, 3 + 3 * 2 + 0, 3 + 3 * 2 + 2]
+    else:
+        assert mask2[forward] == mask2[right] == mask2[left] == 1
 
 
 def test_queen_planes():
@@ -357,3 +436,99 @@ def test_a_cornered_dragon_dies_alone():
     left_moves = [2, 9, 10, 11]                        # left, and two-step moves through it
     assert [a for a in range(12) if not mask1[a]] == left_moves
     assert (mask2 == mask1).all()
+
+
+def test_survival_sees_a_dead_end():
+    # The queen faces east at (8, 8), length 3; ahead is a corridor one tile
+    # wide, (9, 8) to (11, 8), closed at its end: three moves in, then nothing.
+    kelp = [("N", x, 8) for x in (9, 10, 11)] + [("N", x, 9) for x in (9, 10, 11)] + [("W", 12, 8)]
+    m = solo([(8, 8), (7, 8), (6, 8)], kelp=kelp)
+    brain = bccore.Brain()
+    _, (_, mask1, mask2) = brain.observe_match(m, 0)
+    survive, horizon = brain.survival
+    assert horizon == 8
+    assert survive[0] == 3                     # forward: three moves, and stuck
+    assert survive[1] == horizon and survive[2] == horizon
+    assert mask1[0] == 1 and not m.probe(0)    # not fatal yet
+    assert mask2[0] == 0                       # but the queen's shield keeps out of it
+    assert mask2[1] == 1 and mask2[2] == 1
+
+
+@pytest.mark.parametrize("length,lasts", [(3, True), (4, False)])
+def test_survival_knows_the_tail_moves_on(length, lasts):
+    # A 2x2 room walled by kelp. Three long, the dragon can circle it for
+    # ever, stepping where its tail has just left; four long, it fills it.
+    kelp = [("N", 8, 8), ("N", 9, 8), ("N", 8, 10), ("N", 9, 10),
+            ("W", 8, 8), ("W", 8, 9), ("W", 10, 8), ("W", 10, 9)]
+    body = [(8, 8), (8, 9), (9, 9), (9, 8)][:length]
+    m = solo(body, kelp=kelp)
+    brain = bccore.Brain()
+    _, (mask0, mask1, _) = brain.observe_match(m, 0)
+    survive, horizon = brain.survival
+    if lasts:
+        assert survive[1] == horizon           # right, into the free corner: for ever
+        for _ in range(12):                    # and so it does, in the engine
+            assert not m.probe(1)
+            m.reply(brain.decode(1) + "\nENDTURN\n")
+            m.reply("MOVE N\nENDTURN\n")     # the far dragon (B)
+            brain.observe_match(m, 0)
+            assert brain.survival[0][1] == horizon
+    else:
+        assert all(m.probe(a) for a in range(12))
+        assert max(survive[:3]) == 0
+
+
+def test_allies_keep_out_of_the_queens_way():
+    # The queen (0) faces east at (8, 8); an ally (2) faces south at (8, 6).
+    # Its step forward, to (8, 7), would stand beside the queen's head.
+    m = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 13), (14, 13)]),
+                                       ("A", [(8, 6), (8, 5), (8, 4)])]), 0)
+    m.begin()
+    _, (_, mask1, mask2) = m.features(2)
+    forward, right, left = 0, 1, 2
+    assert mask1[forward] == 1 and mask2[forward] == 0
+    assert mask2[right] == 1 and mask2[left] == 1
+
+
+SPLIT, SHED, DISSOLVE = 12, 13, 14
+
+
+@pytest.mark.parametrize("length,sheds", [(5, False), (6, True)])
+def test_the_queen_sheds_to_grow_its_team(length, sheds):
+    # A queen alone in open water: from length 6 it may shed two segments
+    # (SPLIT 2) beside its moves; the half split stays a last resort.
+    body = [(8 - i, 8) for i in range(length)]
+    m = solo(body)
+    _, (mask0, mask1, mask2) = m.features(0)
+    assert mask0[SHED] == 1 and mask1[SHED] == 1
+    assert mask2[SHED] == (1 if sheds else 0)
+    assert mask2[SPLIT] == 0 and mask2[:3].any()
+    assert not m.probe(SHED)
+    m.reply(bccore.decode_action(m.init_block(0), m.round_block(0), SHED) + "\nENDTURN\n")
+    assert len(m.dragons()[0][4]) == length - 2 and len(m.dragons()[2][4]) == 2
+
+
+def test_dissolving_only_feeds_the_queen():
+    # Dragon 2 (A, length 3), its head two steps from its queen's, may dissolve;
+    # far from it, it may not. The queen never does, and it is always death.
+    near = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 13), (14, 13)]),
+                                          ("A", [(9, 7), (9, 6), (9, 5)])]), 0)
+    far = bccore.Match(make_map(16, 16, [("A", [(8, 8), (7, 8), (6, 8)]), ("B", [(13, 13), (14, 13)]),
+                                         ("A", [(2, 2), (2, 3), (2, 4)])]), 0)
+    for m in (near, far):
+        m.begin()
+    obs, (mask0, mask1, mask2) = near.features(2)
+    assert mask0[DISSOLVE] == 1 and mask1[DISSOLVE] == 1 and mask2[DISSOLVE] == 1
+    assert scalar(obs, 55) == 1
+    obs, (_, mask1, _) = far.features(2)
+    assert mask1[DISSOLVE] == 0 and scalar(obs, 55) == 0
+    _, (_, mask1, mask2) = near.features(0)
+    assert mask1[DISSOLVE] == 0 and mask2[DISSOLVE] == 0
+    assert near.probe(DISSOLVE)
+    # Dissolving leaves its body as pearls, every second segment from the head.
+    near.reply("MOVE E\nENDTURN\n")       # the queen
+    near.reply("MOVE N\nENDTURN\n")       # B
+    near.reply("ENDTURN\n")                # dragon 2: no action
+    assert not near.dragons()[2][2]
+    pearls, _ = near.tiles()
+    assert pearls[7][9] and not pearls[6][9] and pearls[5][9]

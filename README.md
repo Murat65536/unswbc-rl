@@ -49,18 +49,24 @@ version of the same network.
   metered sandbox: same observation, same action. A turn costs about 4.1M
   of the 100M points (2.5M of that is the single write), 0.6 MB of memory,
   and the zip is about 460 KB.
-- **Strength.** `bots/rl_bot_v3` (v2's weights widened to the current
-  observation, then 700 iterations, about 46M more decisions, at mask
-  level 2 with the league, level replay and scripted opponents, most of
-  them the careful player; `models/rl_bot_v3.pt`) in the judge's sandbox,
-  with no bot errors:
-  - beats v2 in 151 of 162 games head to head (about +455 Elo);
+- **Strength.** `bots/rl_bot_v6` (v3's weights widened to the current
+  observation and actions, then two runs of 350 iterations at mask level 2,
+  about 23M decisions each: one with memory, the survival search and giving
+  way, exported as `bots/rl_bot_v4`, then one with shed and dissolve,
+  exported as `bots/rl_bot_v5`; then 20 iterations with the enemy-reach
+  shield and its scalars and a league anchored to v5; `models/rl_bot_v6.pt`)
+  in the judge's sandbox, with no bot errors:
+  - beats v5 in 192 of 324 games head to head, drawing 6 (+72 Elo, 95%
+    interval +34 to +111); v5 beat v3 in 114 of 162 (+150) and v4 in 41 of
+    54 (+200);
   - beats the toolkit's random starter in all 108 games on the 15 official
-    maps and 12 generated ones, both sides, two seeds (v2: 106);
-  - beats the careful scripted player in 45 of 54 (v2: 31).
+    maps and 12 generated ones, both sides, two seeds;
+  - beats the careful scripted player in 44 of 54 (v5: 48, v4: 39, v3: 43) and
+    over|yonder's tactics-bot in 48 of 54, drawing 2 (v5: 49, drawing 2).
 
-  Its queen dies in 28 of the 108 games against the starter (v2: 65), 12
-  of them on three maps where each queen starts in a dead end.
+  Its queen dies in 15 of the 108 games against the starter (v5: 14, v3:
+  28), 12 of them by round 9 on the three maps where each queen starts in a
+  dead end. `bots/rl_bot_v5`, `bots/rl_bot_v4`, `bots/rl_bot_v3`,
   `bots/rl_bot_v2` and the earlier NumPy `bots/rl_bot_v1` are kept as
   baselines.
 
@@ -92,27 +98,35 @@ python -m rl.train --games 1024 --rollout 64 --iterations 2000 --official-maps 0
     --kelp 0.0 0.25 --scripted-frac 0.35 --scripted-careful 0.6 \
     --checkpoint-dir checkpoints/run1 --log-csv checkpoints/run1/log.csv
 
-# models/rl_bot_v3.pt is the checkpoint bots/rl_bot_v3 was exported from (iteration
-# 700): actor, critic, optimizer, league and level replay. Continue it with the
-# same flags plus --resume models/rl_bot_v3.pt and a larger --iterations (keep
-# --games 1024: changing it across a resume is untested).
+# models/rl_bot_v6.pt is the checkpoint bots/rl_bot_v6 was exported from (run
+# with the flags above plus --init-from models/rl_bot_v5.pt --league-anchor 0.5,
+# iteration 20): actor, critic, optimizer, league, anchor and level replay.
+# Continue one with the same flags plus --resume and a larger --iterations
+# (keep --games 1024: changing it across a resume is untested).
+# models/rl_bot_v5.pt and models/rl_bot_v3.pt are v5's and v3's.
+#
+# Runs from v5 peak early: against v5, natively, run11 (the v6 run) won 0.62
+# at iteration 20, 0.55 at 60, 0.52 at 100 and 0.41 at 160. Without the
+# anchor (run10) it fell faster (0.42 at 100, 0.25 at 200). Score checkpoints
+# against the bot you start from and keep the best, not the last:
+python -m rl.eval_env checkpoints/run1/ckpt_000020.pt --opponent models/rl_bot_v5.pt
 
 # Compare checkpoints quickly, natively, against the careful scripted player:
 python -m rl.eval_env checkpoints/run1/ckpt_000500.pt checkpoints/run1/latest.pt --opponent careful
 
 # Export the actor as a C++ bot and run the export gate (native + judge sandbox):
-python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v4
+python -m export.export_bot --checkpoint checkpoints/run1/latest.pt --out bots/rl_bot_v7
 
 # Play it in the judge's sandbox, both sides of the official and generated maps,
 # against the random starter, the careful player, or another bot:
-python -m export.evaluate --bot bots/rl_bot_v4 --generated 12
-python -m export.evaluate --bot bots/rl_bot_v4 --opponent careful --generated 12
+python -m export.evaluate --bot bots/rl_bot_v7 --generated 12
+python -m export.evaluate --bot bots/rl_bot_v7 --opponent careful --generated 12
 # Or decide whether a new version beats an old one (SPRT, Elo bounds 0 and 30):
-python -m export.evaluate --bot bots/rl_bot_v4 --opponent bots/rl_bot_v3 --sprt 0 30
+python -m export.evaluate --bot bots/rl_bot_v7 --opponent bots/rl_bot_v6 --sprt 0 30
 
 # The toolkit's own commands work too:
-unswbc run maps/arena.map bots/rl_bot_v3 bots/rl_bot_v3 --sandbox -v
-unswbc submit bots/rl_bot_v3 -n rl-v3 -d "PPO self-play, C++ int8, queen shield"
+unswbc run maps/arena.map bots/rl_bot_v6 bots/rl_bot_v6 --sandbox -v
+unswbc submit bots/rl_bot_v6 -n rl-v6 -d "PPO self-play, C++ int8, queen shield"
 ```
 
 ## How it works
@@ -129,34 +143,54 @@ Seeded with the match seed, a game here is the judge's game, pearls and all.
 
 **`core/include/core/view.h`** is what a dragon knows on its turn, and a
 reader for the wire protocol. **`features.h`** computes everything else from a
-View only:
+View and the dragon's **memory**: each dragon is a process of its own for as
+long as it lives, so it remembers its own body in board coordinates (what it
+sees of it back from its head, then what it remembered from there on). A body
+trails its head's path, so after L moves it knows all of it, far outside its
+window. From those:
 
-- an egocentric observation of 1227 uint8 codes: 24 planes over the 7×7
+- an egocentric observation of 1245 uint8 codes: 24 planes over the 7×7
   window rotated so the dragon faces up (pearls, countdowns, kelp and
   portals by relative side, own/ally/enemy heads and bodies with their
   relative headings, and the segments of this team's queen and of the
-  enemy queen), then 51 scalars (length, free sprint steps, units, round,
+  enemy queen), then 69 scalars (length, free sprint steps, units, round,
   queen, split legality, per-move flags: visibly fatal, pearl, enemy or
   ally head, out of sight; past each first step, how many tiles are
   reachable within the window and whether that region goes on out of
-  sight, so pockets that would trap the dragon show up; and, for where
-  each move ends and for the head's tile now, whether a visible enemy head
-  could reach it before this dragon moves again);
-- 13 relative actions: one step forward/right/left, two steps (each
-  forward/right/left, free from length 5), and splitting off the rear half;
+  sight, so pockets that would trap the dragon show up; for where each move
+  ends and for the head's tile now, whether a visible enemy head could
+  reach it before this dragon moves again; and, after each single step, how
+  many moves it can be sure of surviving: a depth-first search over its
+  own future steps, up to its length plus 2 (8 to 24), with other dragons
+  frozen and its own body, known from memory, freeing as its tail moves;
+  whether its head is within two steps of its queen's head; and how close
+  to an enemy each move ends, in the steps an enemy would need to get
+  there, counting the children enemies could split off: a split turns the
+  parent's tail into the child's head, and the child moves in the round it
+  is born, so every enemy tail can strike like a head);
+- 15 relative actions: one step forward/right/left, two steps (each
+  forward/right/left, free from length 5), splitting off the rear half,
+  shedding a two-segment tail (`SPLIT 2`), and dissolving (no action: the
+  dragon dies and every second segment becomes a pearl);
 - masks: level 0 only removes an illegal split; level 1 also removes moves
   the dragon can see are certain death (kelp, bodies, through portals whose
   far end is in sight, its own tail when it knows the tail moves on, a
-  second step it cannot pay for, an ally's head); level 2, the default,
-  also shields the queen, which decides the first round-limit tiebreak: it
-  never moves onto a head, keeps to open water (regions that go on out of
-  sight, not closed ones, which trap it sooner or later) and out of one
-  step's reach of enemy heads while it has a move that does, and splits
-  only when it has no move left. Each level falls back to the
-  one below if it would leave nothing, and a dragon with only fatal moves
-  still avoids taking an ally with it.
+  second step it cannot pay for, an ally's head, and dissolving anywhere
+  but within two steps of its queen's head, by a dragon of length 3 or
+  more; the queen never dissolves); level 2, the default, also shields the
+  queen, which decides the first round-limit tiebreak: it never moves onto
+  a head; of its other moves it keeps those it can be sure of surviving its
+  horizon after, else those that last longest (a move through a portal
+  whose far end it cannot see counts as lasting one move), and of those
+  the ones that end out of every enemy's reach on its next turn (enemy
+  tails included), else out of one step's; it may shed from length 6
+  before round 350 while no enemy is a step away, and splits in half only
+  when it has no move left. Every other dragon keeps out of its queen's
+  way: it does not end a move beside the queen's head while it has another
+  move. Each level falls back to the one below if it would leave nothing,
+  and a dragon with only fatal moves still avoids taking an ally with it.
 
-The bot compiles these two headers unchanged. Training builds the View
+The bot compiles these two headers unchanged, and keeps one memory. Training builds the View
 straight from the engine (**`state_view.h`**), and also gives the critic
 privileged team standings the actor never sees.
 
@@ -178,7 +212,9 @@ says so, open rows carry into the next rollout, GAE runs along each dragon's
 own decisions. The actor is an MLP on the observation codes trained
 quantisation-aware (int8 weights, uint8 activations); the critic is separate
 and privileged. A share of game slots pit the learner against frozen
-snapshots (a league), another share against a scripted random-safe player
+snapshots (a league; `--league-anchor` makes the run's starting actor the
+opponent some of the time, so the learner can't drift into beating only its
+recent selves), another share against a scripted random-safe player
 played inside the environment (`--scripted-frac`; self-play alone never
 punished losing the queen early, since both sides did it), and Prioritized
 Level Replay picks levels. The log follows the learner's queen: how often
@@ -202,7 +238,7 @@ each game, and with `--sprt` runs a sequential test between two versions.
 | --- | --- |
 | `test_fidelity.py` | our engine = the judge's engine, turn for turn, full seeded games |
 | `test_rules.py` | individual rules on hand-built boards; the occupancy grid; generated boards = their loaded text |
-| `test_core_contract.py` | training's View = the bot's View on every turn; masks are sound (level 2: only the queen's rules); rotation, decoding, queen planes, enemy reach |
+| `test_core_contract.py` | training's View = the bot's View, and a dragon's memory and features fed either way agree, on every turn; the remembered body is never wrong; masks are sound (level 2 only narrows); rotation, decoding, queen planes, enemy reach, survival, giving way |
 | `test_env.py` | every decision saw its turn's board; children in their birth round; shaping telescopes; horizon cuts and bootstraps; threads don't change games; queen deaths, splits and deciders are reported |
 | `test_ppo.py` | rows complete once; vectorised GAE = a plain reference |
 | `test_warm_start.py` | an actor or critic widened to a newer observation computes what it did before |
@@ -213,14 +249,18 @@ each game, and with `--sprt` runs a sequential test between two versions.
 
 - **Sonar is unused.** The View carries messages and echoes, but the
   observation and actions do not use them yet.
-- **The queen still gets cornered.** With the level-2 shield the queen no
-  longer trades heads, splits by choice or is rammed by its allies, but it
-  still dies when no move it can see survives: a long queen in its own
-  coil, a short one in a dead-end corridor, or one boxed in by allies. A
-  7×7 window shows little of a long body; sonar, or allies keeping clear
-  of the queen, may help. (On autarky, dilemma and slithery_fight each
-  queen starts at the mouth of a dead-end corridor and is lost by round 5
-  whatever it does.)
+- **The queen still gets cornered sometimes.** Memory, the survival search
+  and allies giving way cut it from 42% of games against the careful player
+  to about 20% (with v3's weights; v6's queen dies in 10 of 54). What is
+  left is mostly crowds: enemy and allied bodies closing in between the
+  queen's turns, which a search with everyone else frozen cannot foresee.
+  The memory keeps only the body; a remembered map (kelp, portals, pearls)
+  and sonar between allies are the next steps. (On autarky, dilemma and
+  slithery_fight each queen starts at the mouth of a dead-end corridor and
+  is lost by round 9 whatever it does.)
+- **Feeding is crude.** Dissolving beside the queen leaves pearls it can
+  reach, but the mask only checks distance: nothing steers a dragon towards
+  the queen to feed it, and the policy decides on its own when it pays.
 - **The longest-dragon tiebreak.** When both queens die, the bot's habit
   of splitting into many short dragons loses the second tiebreak to
   opponents that keep one long dragon (most of v3's losses to the careful
@@ -228,7 +268,7 @@ each game, and with `--sprt` runs a sequential test between two versions.
 - **The policy is an MLP.** A small convolutional or attention trunk over
   the window would likely learn faster; the points budget leaves room for
   a much bigger network (a turn uses about 4% of it).
-- **One split size** (the rear half) and two-step sprints at most.
+- **Two split sizes** (the rear half, a two-segment tail) and two-step sprints at most.
 - **Settings chosen before measuring.** Mask level, the shaping scale and the
   level distribution deserve a sweep now that training is fast; so does the
   league and PLR configuration.
@@ -236,6 +276,15 @@ each game, and with `--sprt` runs a sequential test between two versions.
   (~0.2–0.3M decisions per core); compacting the board (tiles and edges)
   would help if a GPU makes the environment the bottleneck. A CUDA port
   was not attempted.
+
+## Sparring with over|yonder's bots
+
+`scripts/build_overyonder_bots.sh` builds the example bots from
+[over|yonder's Loong Game repository](https://github.com/overyonder/the-loong-game),
+whose [blog](https://github.com/overyonder/the-loong-game/tree/master/blog)
+much of this design draws on: tactics-bot, roles-bot and first-bot (Nim,
+written out as C) and room-c. Pass one as `--opponent` to `export.evaluate`.
+They were written for the rules before Slay the Queen.
 
 ## Rules reference
 

@@ -220,6 +220,9 @@ class BatchEnv
         int64_t mLastRow = -1;
         float mLastPhi = 0.0f;
         int mLastRound = 0;
+        /// What the dragon's own process would remember, updated at each of
+        /// its turns from the same View the bot would read.
+        Memory mMemory;
     };
 
     struct Slot

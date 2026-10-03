@@ -26,13 +26,15 @@ inline uint32_t CarefulNoise(uint64_t& rng)
 }
 
 /// A single step the level-2 mask allows that is not onto a head (so it never
-/// trades heads, and never splits by choice), scored by the room past it (a
-/// pocket smaller than the dragon scores low), a pearl there, and how close
-/// enemy heads are (see EnemyReach), with three bits of `noise` per step
-/// breaking ties. With no such step, the first action the mask allows.
-inline int CarefulAction(View const& view, uint32_t noise)
+/// trades heads, and never splits by choice), scored first by how long it can
+/// be sure of surviving after it (Survival, with its Memory), then by the
+/// room past it (a pocket smaller than the dragon scores low), a pearl there,
+/// and how close enemy heads are (see EnemyReach), with three bits of `noise`
+/// per step breaking ties. With no such step, the first action the mask
+/// allows.
+inline int CarefulAction(View const& view, uint32_t noise, Memory const* memory = nullptr)
 {
-    MoveSight const sight = LookAhead(view);
+    MoveSight const sight = LookAhead(view, memory);
     std::array<uint8_t, kNumActions> mask{};
     Mask(view, sight, 2, mask.data());
     std::array<uint8_t, kTiles> const reach = EnemyReach(view);
@@ -54,6 +56,7 @@ inline int CarefulAction(View const& view, uint32_t noise)
             score += view.mTiles[target].mPearl ? 15 : 0;
             score -= 25 * reach[target];
         }
+        score += sight.mSurvive[a] >= sight.mHorizon ? 200 : 5 * sight.mSurvive[a];
         score = score * 8 + static_cast<int>((noise >> (3 * a)) & 7);
         if (best < 0 || score > bestScore)
         {
